@@ -8,7 +8,7 @@ Spec: `.scratch/ble-webapp/spec.md` (Brightness rules, Boot order, Serial marker
 
 **Board:** required
 
-**Status:** ready-for-agent
+**Status:** done
 
 - [x] Boot prints `[BOOT] reason=` then `[STAGE] selftest: start` and `[STAGE] selftest: done`, then `[LED] brightness=128 duty=<pct>% freq=<hz>` with the duty within 50 ± 1 % low and the frequency near 20 kHz.
   Evidence: `./verify.sh --flash` capture `build/verify/capture-20260930-041842.log`: `[BOOT] reason=usb` +2.06 s, `[STAGE] selftest: start`, `[STAGE] selftest: done` +3.61 s, `[LED] brightness=128 duty=50.2% freq=19998` +3.62 s (Harness `RESULT: PASS (9/9 checks)`).
