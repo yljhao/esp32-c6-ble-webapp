@@ -8,7 +8,7 @@ Spec: `.scratch/ble-webapp/spec.md` (Harness, Wire contract, Testing Decisions).
 
 **Board:** none
 
-**Status:** ready-for-agent
+**Status:** done
 
 - [x] `bleak` installed in the project venv (not the Zephyr venv) and recorded in its requirements.
   Evidence: `.venv/bin/python -m pip list`: `bleak 3.0.2`, `dbus-fast 5.0.22`; `tools/requirements.txt` has `bleak>=0.22`; `~/zephyrproject/.venv/bin/python -c "import bleak"` gives `ModuleNotFoundError` (Zephyr venv untouched).
