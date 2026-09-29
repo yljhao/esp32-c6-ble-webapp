@@ -11,4 +11,14 @@ config C6_BOOT_MARKER_DELAY_MS
 	  firmware waits this long before printing "[BOOT] reason=" so a capture
 	  started right after a reset or a flash sees the first Marker.
 
+config C6_HANG_CMD
+	bool "Debug: the debug hang serial-shell command"
+	default n
+	depends on SHELL
+	help
+	  Adds "debug hang" (src/debug_hang.c): the main loop stops feeding
+	  the watchdog, so the board must reset within the watchdog window and
+	  the next boot report "[BOOT] reason=watchdog". Enabled by debug.conf
+	  in a separate build directory; never in the production image.
+
 source "Kconfig.zephyr"

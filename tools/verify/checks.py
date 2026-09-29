@@ -12,6 +12,14 @@ SELFTEST_DONE = "[STAGE] selftest: done"
 SELFTEST_FAIL_RE = re.compile(r"^\[STAGE\] selftest: fail step=(\d+)\s*$")
 LED_RE = re.compile(r"^\[LED\] brightness=(\d+) duty=(\d+(?:\.\d+)?)% freq=(\d+)\s*$")
 
+WDT_ARMED = "[WDT] armed window=5000ms"
+ROM_BANNER = "ESP-ROM:"
+HANG_MARKER = "[DBG] hang: main loop stops feeding"
+# The watchdog bites 5 s after the last feed; the main loop feeds once a second, so the
+# reset follows the hang command by 4 to 5 s (plus the ROM start). Anything faster means the
+# hang did not stop the feeding; anything slower than the limit means the bite is late.
+BITE_MIN_S = 2.0
+
 # Duty readback tolerances (spec: Testing Decisions; reference tolerance).
 # The User LED is active-low, so the pad is low for the time the LED is on:
 # Brightness 0 reads 0.0 % low, 255 reads 100.0 % low, both with no edges.
@@ -135,11 +143,101 @@ def check_boot_brightness(lines):
     return True, detail
 
 
+def _is_wdt_armed(text):
+    return text.strip() == WDT_ARMED
+
+
+def check_wdt_armed(lines):
+    """`[WDT] armed window=5000ms` after the Self-test ended (done or fail)."""
+    i = _first(lines, _is_start)
+    j = _first(lines, _is_selftest_end, i + 1) if i is not None else None
+    if j is None:
+        return False, "no Self-test end marker to order the watchdog after"
+    k = _first(lines, _is_wdt_armed)
+    if k is None:
+        return False, f"no {WDT_ARMED} marker"
+    if k < j:
+        return False, f"{WDT_ARMED} printed before the Self-test ended (must come after)"
+    return True, f"{WDT_ARMED} at +{lines[k][0]:.3f}s"
+
+
+def check_idle_no_bite(lines, min_s, observed_s=None):
+    """No reset in at least `min_s` seconds after the watchdog was armed. A reset shows as a
+    ROM banner or a second `[BOOT] reason=` line after the armed marker. `observed_s` is how
+    long the capture ran (default: the time of its last line)."""
+    k = _first(lines, _is_wdt_armed)
+    if k is None:
+        return False, f"no {WDT_ARMED} marker, cannot judge the idle run"
+    t_armed = lines[k][0]
+    for t, _, text in lines[k + 1:]:
+        if text.startswith(ROM_BANNER) or is_boot_line(text):
+            return False, f"board reset at +{t:.1f}s ({text.strip()}), {t - t_armed:.1f}s after arming"
+    end = observed_s if observed_s is not None else (lines[-1][0] if lines else 0.0)
+    span = end - t_armed
+    if span < min_s:
+        return False, f"observed {span:.1f}s after arming, need {min_s:.0f}s"
+    return True, f"no reset in {span:.1f}s after arming"
+
+
+def check_wdt_bite(lines, max_s):
+    """After the debug hang marker: a reset (ROM banner) BITE_MIN_S..max_s later, then
+    `[BOOT] reason=watchdog`."""
+    h = _first(lines, lambda t: t.strip() == HANG_MARKER)
+    if h is None:
+        return False, f"no '{HANG_MARKER}' marker (was the hang command accepted?)"
+    r = _first(lines, lambda t: t.startswith(ROM_BANNER), h + 1)
+    if r is None:
+        return False, f"no reset after the hang marker within the capture"
+    dt = lines[r][0] - lines[h][0]
+    if dt > max_s:
+        return False, f"reset {dt:.1f}s after the hang, limit {max_s:.0f}s"
+    if dt < BITE_MIN_S:
+        return False, f"reset {dt:.1f}s after the hang, too soon for the watchdog"
+    b = _first(lines, is_boot_line, r + 1)
+    if b is None:
+        return False, f"reset {dt:.1f}s after the hang, but no [BOOT] reason= marker followed"
+    text = lines[b][2].strip()
+    if text != "[BOOT] reason=watchdog":
+        return False, f"reset {dt:.1f}s after the hang, but {text}"
+    return True, f"reset {dt:.1f}s after the hang, then {text}"
+
+
+HANG_TEXTS = (b"Stop the main loop feeding the watchdog", HANG_MARKER.encode())
+
+
+def check_no_hang_command(config_text, image):
+    """The production build carries no hang command: CONFIG_C6_HANG_CMD is not set in its
+    .config and none of the command's strings is in the image."""
+    if not image:
+        return False, "image is empty"
+    if re.search(r"^CONFIG_C6_HANG_CMD=y", config_text, re.M):
+        return False, "CONFIG_C6_HANG_CMD=y in the build's .config"
+    for text in HANG_TEXTS:
+        if text in image:
+            return False, f"'{text.decode()}' found in the image"
+    return True, f"CONFIG_C6_HANG_CMD not set, no hang text in {len(image)} image bytes"
+
+
+def check_hang_refused(lines, window_s, observed_s=None):
+    """After typing `debug hang` to the production image, for `window_s` seconds: no hang
+    marker and no reset."""
+    for t, _, text in lines:
+        if text.strip() == HANG_MARKER:
+            return False, f"hang accepted at +{t:.1f}s"
+        if text.startswith(ROM_BANNER):
+            return False, f"board reset at +{t:.1f}s"
+    end = observed_s if observed_s is not None else (lines[-1][0] if lines else 0.0)
+    if end < window_s:
+        return False, f"observed {end:.1f}s, need {window_s:.0f}s"
+    return True, f"hang command not accepted, no reset in {end:.1f}s"
+
+
 def check_marker_order(lines):
-    """[BOOT] reason= -> [STAGE] selftest: start -> selftest end -> [LED] brightness=128."""
+    """[BOOT] reason= -> [STAGE] selftest: start -> selftest end -> [LED] brightness=128 -> [WDT] armed."""
     steps = [("[BOOT] reason=", is_boot_line), ("[STAGE] selftest: start", _is_start),
              ("[STAGE] selftest: done|fail", _is_selftest_end),
-             ("[LED] brightness=128", lambda t: (parse_led(t) or (None,))[0] == 128)]
+             ("[LED] brightness=128", lambda t: (parse_led(t) or (None,))[0] == 128),
+             (WDT_ARMED, _is_wdt_armed)]
     at = -1
     for name, pred in steps:
         i = _first(lines, pred, at + 1)
@@ -150,8 +248,9 @@ def check_marker_order(lines):
 
 
 class BootCaptureDone:
-    """Capture stop predicate: the boot is complete once `[LED] brightness=128` follows
-    the Self-test's end marker (done or fail)."""
+    """Capture stop predicate: the boot is complete once `[WDT] armed window=5000ms`
+    follows the Self-test's end marker (done or fail); the boot's `[LED] brightness=128`
+    precedes it."""
 
     def __init__(self):
         self.ended = False
@@ -160,8 +259,7 @@ class BootCaptureDone:
         if _is_selftest_end(text):
             self.ended = True
             return False
-        led = parse_led(text)
-        return self.ended and led is not None and led[0] == 128
+        return self.ended and _is_wdt_armed(text)
 
 
 def format_check(name, ok, detail=""):

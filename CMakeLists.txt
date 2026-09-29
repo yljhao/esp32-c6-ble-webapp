@@ -16,4 +16,6 @@ target_sources(app PRIVATE
   src/user_led.c
   src/selftest.c
   src/brightness.c
+  src/watchdog.c
 )
+target_sources_ifdef(CONFIG_C6_HANG_CMD app PRIVATE src/debug_hang.c)

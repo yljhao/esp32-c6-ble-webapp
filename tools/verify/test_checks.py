@@ -58,7 +58,8 @@ DONE = "[STAGE] selftest: done"
 RB_0 = "[LED] brightness=0 duty=0.0% freq=0"
 RB_128 = "[LED] brightness=128 duty=50.1% freq=19998"
 RB_255 = "[LED] brightness=255 duty=100.0% freq=0"
-GOOD = [BOOT, START, RB_0, RB_128, RB_255, DONE, RB_128]
+WDT = "[WDT] armed window=5000ms"
+GOOD = [BOOT, START, RB_0, RB_128, RB_255, DONE, RB_128, WDT]
 
 
 class LedMarker(unittest.TestCase):
@@ -169,17 +170,174 @@ class MarkerOrder(unittest.TestCase):
         self.assertFalse(ok)
         self.assertIn("[LED]", detail)
 
+    def test_watchdog_before_the_boot_brightness_fails(self):
+        ok, _ = checks.check_marker_order(cap(BOOT, START, DONE, WDT, RB_128))
+        self.assertFalse(ok)
+
+    def test_missing_watchdog_marker_names_it(self):
+        ok, detail = checks.check_marker_order(cap(BOOT, START, DONE, RB_128))
+        self.assertFalse(ok)
+        self.assertIn("[WDT]", detail)
+
 
 class BootCaptureStop(unittest.TestCase):
-    def test_stops_on_the_led_marker_after_selftest_only(self):
+    def test_stops_on_the_watchdog_marker_after_selftest_only(self):
         stop = checks.BootCaptureDone()
         fired = [stop(t) for t in GOOD]
-        self.assertEqual(fired, [False, False, False, False, False, False, True])
+        self.assertEqual(fired, [False] * 7 + [True])
+
+    def test_a_watchdog_marker_before_the_selftest_end_does_not_stop(self):
+        stop = checks.BootCaptureDone()
+        self.assertFalse(stop(WDT))
 
     def test_stops_after_a_selftest_failure_too(self):
         stop = checks.BootCaptureDone()
-        fired = [stop(t) for t in (BOOT, START, "[STAGE] selftest: fail step=1", RB_128)]
-        self.assertEqual(fired, [False, False, False, True])
+        fired = [stop(t) for t in (BOOT, START, "[STAGE] selftest: fail step=1", RB_128, WDT)]
+        self.assertEqual(fired, [False, False, False, False, True])
+
+
+class WatchdogArmed(unittest.TestCase):
+    def test_marker_after_selftest_done_passes(self):
+        ok, detail = checks.check_wdt_armed(cap(*GOOD))
+        self.assertTrue(ok, detail)
+        self.assertIn("[WDT] armed window=5000ms", detail)
+
+    def test_missing_marker_fails(self):
+        ok, detail = checks.check_wdt_armed(cap(*GOOD[:-1]))
+        self.assertFalse(ok)
+        self.assertIn("[WDT]", detail)
+
+    def test_other_window_fails(self):
+        for text in ("[WDT] armed window=30000ms", "[WDT] armed window=500ms", "[WDT] armed window=5000"):
+            ok, _ = checks.check_wdt_armed(cap(BOOT, START, DONE, text))
+            self.assertFalse(ok, text)
+
+    def test_marker_before_selftest_done_fails(self):
+        ok, detail = checks.check_wdt_armed(cap(BOOT, START, WDT, DONE))
+        self.assertFalse(ok)
+        self.assertIn("after", detail)
+
+    def test_marker_after_a_selftest_failure_still_counts_as_after_the_end(self):
+        ok, _ = checks.check_wdt_armed(cap(BOOT, START, "[STAGE] selftest: fail step=1", WDT))
+        self.assertTrue(ok)
+
+
+class IdleNoBite(unittest.TestCase):
+    def test_quiet_for_the_whole_window_passes(self):
+        lines = cap(*GOOD) + [(70.0, None, "")]
+        ok, detail = checks.check_idle_no_bite(lines, 60.0)
+        self.assertTrue(ok, detail)
+
+    def test_window_shorter_than_asked_fails(self):
+        lines = cap(*GOOD)
+        ok, detail = checks.check_idle_no_bite(lines, 60.0, observed_s=30.0)
+        self.assertFalse(ok)
+        self.assertIn("need 60", detail)
+
+    def test_a_second_boot_marker_after_arming_fails(self):
+        lines = cap(*GOOD) + [(20.0, None, "ESP-ROM:esp32c6-20220919"), (22.0, None, "[BOOT] reason=watchdog")]
+        ok, detail = checks.check_idle_no_bite(lines, 60.0, observed_s=60.0)
+        self.assertFalse(ok)
+        self.assertIn("reset", detail)
+
+    def test_no_armed_marker_fails(self):
+        ok, _ = checks.check_idle_no_bite(cap(BOOT, START, DONE), 60.0, observed_s=60.0)
+        self.assertFalse(ok)
+
+    def test_boot_lines_before_arming_are_not_a_bite(self):
+        ok, _ = checks.check_idle_no_bite(cap("ESP-ROM:esp32c6", *GOOD), 10.0, observed_s=60.0)
+        self.assertTrue(ok)
+
+
+HANG = "[DBG] hang: main loop stops feeding"
+ROM = "ESP-ROM:esp32c6-20220919"
+
+
+def timed(*pairs):
+    return [(t, None, s) for t, s in pairs]
+
+
+class WatchdogBite(unittest.TestCase):
+    def test_reset_within_the_limit_and_watchdog_reason_passes(self):
+        lines = timed((10.0, HANG), (14.8, ROM), (17.0, "[BOOT] reason=watchdog"))
+        ok, detail = checks.check_wdt_bite(lines, 7.0)
+        self.assertTrue(ok, detail)
+        self.assertIn("4.8", detail)
+
+    def test_no_hang_marker_fails(self):
+        ok, detail = checks.check_wdt_bite(timed((1.0, ROM), (3.0, "[BOOT] reason=watchdog")), 7.0)
+        self.assertFalse(ok)
+        self.assertIn("hang", detail)
+
+    def test_no_reset_after_the_hang_fails(self):
+        ok, detail = checks.check_wdt_bite(timed((10.0, HANG), (18.0, "noise")), 7.0)
+        self.assertFalse(ok)
+        self.assertIn("no reset", detail)
+
+    def test_reset_too_late_fails(self):
+        ok, detail = checks.check_wdt_bite(timed((10.0, HANG), (17.5, ROM), (19.5, "[BOOT] reason=watchdog")), 7.0)
+        self.assertFalse(ok)
+        self.assertIn("7.5", detail)
+
+    def test_reset_too_early_fails(self):
+        ok, _ = checks.check_wdt_bite(timed((10.0, HANG), (10.3, ROM), (12.3, "[BOOT] reason=watchdog")), 7.0)
+        self.assertFalse(ok)
+
+    def test_other_reason_fails_and_names_it(self):
+        ok, detail = checks.check_wdt_bite(timed((10.0, HANG), (14.8, ROM), (17.0, "[BOOT] reason=software")), 7.0)
+        self.assertFalse(ok)
+        self.assertIn("software", detail)
+
+    def test_no_boot_marker_after_the_reset_fails(self):
+        ok, detail = checks.check_wdt_bite(timed((10.0, HANG), (14.8, ROM)), 7.0)
+        self.assertFalse(ok)
+        self.assertIn("[BOOT]", detail)
+
+
+class NoHangCommand(unittest.TestCase):
+    CFG = "CONFIG_WATCHDOG=y\n# CONFIG_C6_HANG_CMD is not set\n"
+
+    def test_clean_config_and_image_pass(self):
+        ok, detail = checks.check_no_hang_command(self.CFG, b"\x00firmware\x00")
+        self.assertTrue(ok, detail)
+
+    def test_option_set_fails(self):
+        ok, detail = checks.check_no_hang_command(self.CFG + "CONFIG_C6_HANG_CMD=y\n", b"x")
+        self.assertFalse(ok)
+        self.assertIn("CONFIG_C6_HANG_CMD", detail)
+
+    def test_command_text_in_the_image_fails(self):
+        ok, detail = checks.check_no_hang_command(self.CFG, b"\x00" + checks.HANG_MARKER.encode() + b"\x00")
+        self.assertFalse(ok)
+        self.assertIn("image", detail)
+
+    def test_command_registration_text_in_the_image_fails(self):
+        ok, _ = checks.check_no_hang_command(self.CFG, b"..Stop the main loop feeding the watchdog..")
+        self.assertFalse(ok)
+
+    def test_empty_image_fails(self):
+        ok, _ = checks.check_no_hang_command(self.CFG, b"")
+        self.assertFalse(ok)
+
+
+class HangRefused(unittest.TestCase):
+    def test_nothing_happens_passes(self):
+        ok, detail = checks.check_hang_refused(timed((0.1, "debug hang"), (9.0, "noise")), 8.0)
+        self.assertTrue(ok, detail)
+
+    def test_hang_marker_fails(self):
+        ok, detail = checks.check_hang_refused(timed((1.0, HANG)), 8.0)
+        self.assertFalse(ok)
+        self.assertIn("accepted", detail)
+
+    def test_reset_fails(self):
+        ok, detail = checks.check_hang_refused(timed((3.0, ROM)), 8.0)
+        self.assertFalse(ok)
+        self.assertIn("reset", detail)
+
+    def test_window_too_short_fails(self):
+        ok, _ = checks.check_hang_refused(timed((0.1, "x")), 8.0, observed_s=3.0)
+        self.assertFalse(ok)
 
 
 class Result(unittest.TestCase):
