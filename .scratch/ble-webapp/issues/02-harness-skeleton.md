@@ -8,7 +8,7 @@ Spec: `.scratch/ble-webapp/spec.md` (Harness, Testing Decisions). Reference: the
 
 **Board:** required
 
-**Status:** ready-for-agent
+**Status:** done
 
 - [x] One command runs the whole Harness with stdin closed and prints the per-Check lines and the `RESULT:` line.
 - [x] A `--flash` mode flashes before capturing; without it the running image is checked.

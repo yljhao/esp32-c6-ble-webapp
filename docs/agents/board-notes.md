@@ -46,6 +46,7 @@ Dated, append-only. A card line points here for its reason.
 - 2026-09-30 (esptool-build f22af07): still unsupported: `--baud` (accepted, prints a note, ignored on USB-CDC), `erase-flash` (so `west flash --erase` fails; FLASH_BEGIN erases the written region anyway), `--encrypt` / `--esp-encrypt`. `--flash-size detect` falls back to 4MB (the board passes 4MB, so not reached). ROM-only (no stub): ~140 KB in ~4 s.
 - 2026-09-30 (read from Zephyr 4.4.2 `runners/esp32.py` do_run, reported by esptool-build): never `west flash --no-reset`; with reset off the runner omits `write-flash -u` and builds a broken command.
 - 2026-09-30 (verified on this PC): no upstream esptool anywhere. Both the runner (`runners/esp32.py:84`, bare `esptool`) and the build (`find_program(ESPTOOL_EXECUTABLE esptool)`) resolve through PATH; the only hits are the two esptool-build launchers (Zephyr venv `bin/esptool`, `~/.local/bin/esptool`, the latter first when the venv is not active). `pip show esptool` in the Zephyr venv: not found; `import esptool` fails in the venv and system Python; nothing in `/usr/bin`, `/usr/local/bin`, `~/.espressif/tools` (only `openocd-esp32`). A later `pip install esptool` would silently win on PATH, so the build script guards it (see spec).
+- 2026-09-30 (reported by the esptool-build session): the `get-security-info --after` handling and `erase-flash` that this project relies on are committed and pushed as esptool-build d7b0966; the working tree the launchers import matched it when committed.
 
 ### Reset method
 
