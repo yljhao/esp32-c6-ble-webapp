@@ -8,7 +8,7 @@ Spec: `.scratch/ble-webapp/spec.md` (Shell link command restriction). ADR-0001.
 
 **Board:** required
 
-**Status:** ready-for-agent
+**Status:** done
 
 - [x] `kernel reboot` sent over the Shell link is refused with a line starting `ERR ` and the board does not reset (no new `[BOOT]` within 5 s).
 - [x] `kernel reboot` on the serial shell resets the board (`[BOOT] reason=software`).
