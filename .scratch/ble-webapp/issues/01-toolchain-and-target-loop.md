@@ -8,7 +8,7 @@ Spec: `.scratch/ble-webapp/spec.md`. Read `CLAUDE.md`, `CONTEXT.md`, `docs/adr/`
 
 **Board:** required
 
-**Status:** ready-for-agent
+**Status:** done
 
 - [x] The build script builds the app; `./build.sh test` runs twister on `native_sim/native/64` over the repo's tests and exits 0, and exits non-zero when an assertion is broken (red path shown, then restored).
 - [x] The esptool guard: build and flash abort with a clear message unless `command -v esptool` is an esptool-build launcher, the build's cached esptool executable is that launcher, and neither the Zephyr venv Python nor the system Python can `import esptool`. Red path shown (e.g. a PATH with a fake `esptool` first), then restored.
