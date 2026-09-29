@@ -335,11 +335,18 @@ class WriteEncoding(unittest.TestCase):
 
 
 class NoHardware(unittest.TestCase):
-    def test_logic_module_imports_neither_bleak_nor_serial(self):
-        code = ("import sys; sys.path.insert(0, %r); import central_logic; "
+    def imported_modules(self, module):
+        code = ("import sys; sys.path.insert(0, %r); import %s; "
                 "bad = [m for m in ('bleak', 'serial', 'dbus_fast') if m in sys.modules]; "
-                "sys.exit('imported: %%s' %% bad if bad else 0)") % os.path.dirname(os.path.abspath(__file__))
-        r = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, timeout=30)
+                "sys.exit('imported: %%s' %% bad if bad else 0)") % (os.path.dirname(os.path.abspath(__file__)), module)
+        return subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, timeout=30)
+
+    def test_logic_module_imports_neither_bleak_nor_serial(self):
+        r = self.imported_modules("central_logic")
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+    def test_bleak_wrapper_imports_no_bluetooth_or_serial_until_used(self):
+        r = self.imported_modules("central")
         self.assertEqual(r.returncode, 0, r.stderr)
 
 
