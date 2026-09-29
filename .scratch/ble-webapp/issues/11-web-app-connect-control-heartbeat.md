@@ -10,7 +10,7 @@ Spec: `.scratch/ble-webapp/spec.md` (Web App, Web App automation, user stories 1
 
 **Status:** ready-for-agent
 
-- [ ] Playwright selects `XIAO-C6-LED` through CDP `DeviceAccess` without a human; if this cannot work, stop and report instead of substituting a human step.
+- [ ] Playwright selects `XIAO-C6-LED` through CDP `DeviceAccess` without a human; if this cannot work after the escalation in `CLAUDE.md`, park this ticket as `needs-info` with the evidence instead of substituting a human step.
 - [ ] The page shows connected and the slider shows the board's current Brightness (50 % at Brightness 128).
 - [ ] Setting the slider to 50 % prints `[LED] brightness=128` on the serial console; 0 % and 100 % give 0 and 255.
 - [ ] The displayed Heartbeat `seq` updates at least twice within 3 s.

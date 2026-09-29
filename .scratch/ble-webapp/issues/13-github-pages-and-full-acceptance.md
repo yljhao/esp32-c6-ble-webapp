@@ -10,7 +10,7 @@ Spec: `.scratch/ble-webapp/spec.md` (Web App, Further Notes). Outward-facing: cr
 
 **Status:** ready-for-agent
 
-- [ ] Before creating the repository, pushing, or enabling Pages: ask the user and wait for an explicit yes. Check that nothing secret or machine-specific that should not be public is committed.
+- [ ] Authorized by the user 2026-09-30 (no further question needed): create the public repository, push, enable Pages. First check that nothing secret or machine-specific that should not be public is committed (tokens, keys, `prj.local.conf`-style files, the venv, build output); if anything is doubtful, park this ticket as `needs-info` instead of publishing.
 - [ ] The Pages URL serves the Web App over HTTPS; the workflow run is green.
 - [ ] The Playwright flows of tickets 11 and 12 pass against the Pages URL.
 - [ ] The full Harness run (flash mode) passes; board-notes card lines "Verify" and "Production state" are filled in.
