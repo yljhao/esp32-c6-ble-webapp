@@ -8,7 +8,7 @@ a reset is pending). The helper waits for the port node to come back in case the
 USB-Serial/JTAG controller re-enumerates (see docs/agents/board-notes.md,
 log: Reset method, for what was observed on this board).
 
-Used by build.sh identify, build.sh serial (console.py) and the Harness.
+Used by build.sh serial (console.py) and the Harness.
 
     python tools/board/reset.py [--port /dev/ttyACM0] [--timeout 10]
 """

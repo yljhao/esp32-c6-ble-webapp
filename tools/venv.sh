@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# The project's own Python environment (.venv at the repo root), shared by the
-# board tools, the Harness and the Host GUI. Never the Zephyr venv.
+# The project's own Python environment (.venv at the repo root), used by the
+# board tools and the Harness. Never the Zephyr venv.
 #   tools/venv.sh ensure   create .venv and install tools/requirements.txt if needed
 #   tools/venv.sh python   print the interpreter path (after ensure)
 set -euo pipefail

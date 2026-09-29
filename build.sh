@@ -142,7 +142,7 @@ cmd_console() {
 # own red-path test (a fake esptool first on PATH, an importable esptool module...).
 cmd_test() {
   zephyr_env
-  local out="$ROOT/build/twister"
+  local out="$ROOT/twister-out"
   west twister --testsuite-root "$ROOT/tests" --platform "${C6_TEST_PLATFORM:-native_sim/native/64}" \
     --outdir "$out" --clobber-output --inline-logs --no-detailed-test-id "$@"
   echo "build.sh: host suites passed (report: $out/twister.json)"

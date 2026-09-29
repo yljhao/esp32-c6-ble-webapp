@@ -48,58 +48,69 @@ def capture(port, seconds, do_reset=True, stop_when=None, sink=None, on_ready=No
     board's response, no reset (the board keeps running)."""
     lines = []
     ser = _open(port)
-    ser.reset_input_buffer()
-    # The port stays open across the reset: the USB-Serial/JTAG controller
-    # survives an RTS reset on this board, so the ROM's first lines are caught.
-    t0 = board_reset.pulse(ser) if do_reset else time.monotonic()
-    if on_ready:
-        on_ready()
-    if send:
-        ser.write(send)
-    # Bytes the previous session left in flight are delivered together with
-    # the fresh boot; after a reset only lines from the ROM banner on count.
-    syncing = do_reset
     buf = b""
-    stop_at = None   # monotonic time to return at once stop_when has fired
+    t0 = time.monotonic()
+    # ser is always the port currently open: the finally closes whichever it is,
+    # including one reopened after the device re-enumerated.
     try:
-        with ser:
-            while True:
-                if seconds and time.monotonic() - t0 >= seconds:
-                    break
-                if stop_at is not None and time.monotonic() >= stop_at:
-                    break
+        ser.reset_input_buffer()
+        # The port stays open across the reset: the USB-Serial/JTAG controller
+        # survives an RTS reset on this board, so the ROM's first lines are caught.
+        t0 = board_reset.pulse(ser) if do_reset else time.monotonic()
+        if on_ready:
+            on_ready()
+        if send:
+            ser.write(send)
+        # Bytes the previous session left in flight are delivered together with
+        # the fresh boot; after a reset only lines from the ROM banner on count.
+        syncing = do_reset
+        stop_at = None   # monotonic time to return at once stop_when has fired
+        while True:
+            if seconds and time.monotonic() - t0 >= seconds:
+                break
+            if stop_at is not None and time.monotonic() >= stop_at:
+                break
+            try:
+                chunk = ser.read(256)
+            except serial.SerialException as e:
+                # the device re-enumerated (port node gone): reopen
+                if sink:
+                    sink(time.monotonic() - t0, datetime.datetime.now(),
+                         f"<console: port lost ({e}); reopening>")
                 try:
-                    chunk = ser.read(256)
-                except serial.SerialException as e:
-                    # the device re-enumerated (port node gone): reopen
-                    if sink:
-                        sink(time.monotonic() - t0, datetime.datetime.now(),
-                             f"<console: port lost ({e}); reopening>")
-                    board_reset.wait_for_port(port)
-                    ser = _open(port)
-                    continue
-                if not chunk:
-                    continue
-                buf += chunk
-                while b"\n" in buf:
-                    raw, buf = buf.split(b"\n", 1)
-                    entry = (time.monotonic() - t0, datetime.datetime.now(),
-                             raw.decode("utf-8", "replace").rstrip("\r"))
-                    if syncing and (entry[2].startswith(ROM_BANNER) or entry[0] > SYNC_GRACE_S):
-                        syncing = False
-                        if lines and sink:
-                            sink(entry[0], entry[1],
-                                 f"<console: {len(lines)} stale line(s) above predate the reset>")
-                        lines = []
-                    lines.append(entry)
-                    if sink:
-                        sink(*entry)
-                    if stop_when and stop_at is None and not syncing and stop_when(entry[2]):
-                        if linger <= 0:
-                            return lines
-                        stop_at = time.monotonic() + linger
+                    ser.close()
+                except (OSError, serial.SerialException):
+                    pass
+                board_reset.wait_for_port(port)
+                ser = _open(port)
+                continue
+            if not chunk:
+                continue
+            buf += chunk
+            while b"\n" in buf:
+                raw, buf = buf.split(b"\n", 1)
+                entry = (time.monotonic() - t0, datetime.datetime.now(),
+                         raw.decode("utf-8", "replace").rstrip("\r"))
+                if syncing and (entry[2].startswith(ROM_BANNER) or entry[0] > SYNC_GRACE_S):
+                    syncing = False
+                    if lines and sink:
+                        sink(entry[0], entry[1],
+                             f"<console: {len(lines)} stale line(s) above predate the reset>")
+                    lines = []
+                lines.append(entry)
+                if sink:
+                    sink(*entry)
+                if stop_when and stop_at is None and not syncing and stop_when(entry[2]):
+                    if linger <= 0:
+                        return lines
+                    stop_at = time.monotonic() + linger
     except KeyboardInterrupt:
         pass
+    finally:
+        try:
+            ser.close()
+        except (OSError, serial.SerialException):
+            pass
     if buf:
         entry = (time.monotonic() - t0, datetime.datetime.now(),
                  buf.decode("utf-8", "replace"))
