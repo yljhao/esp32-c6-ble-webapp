@@ -13,8 +13,8 @@ One line each, always current. This is the whole file for most sessions. A card 
 - Flash: `west flash -d build` day to day, `./build.sh flash` (pins `--chip esp32c6`) for the Harness and acceptance; both verified here; never `--no-reset`, `--sysbuild`, MCUboot (ADR-0003).
 - Reset: `.venv/bin/python tools/board/reset.py` (RTS pulse through USB-Serial/JTAG, reads the ROM banner, port stays; see log: Reset method).
 - Capture: `./build.sh serial [SECONDS] [--expect REGEX]` resets, captures with timestamps, exits 1 on a missing marker; `./build.sh console` skips the reset (see log: Capture command).
-- Test: `./build.sh test` = twister over `tests/` on `native_sim/native/64` plus the esptool guard's red-path test; exit non-zero on any failure.
-- Verify: none yet.
+- Test: `./build.sh test` = twister over `tests/` on `native_sim/native/64`, the esptool guard's red-path test and the Harness unittest (`tools/verify`); exit non-zero on any failure.
+- Verify: `./verify.sh [--flash]` runs the acceptance Harness (final `RESULT:` line, exit 0 only on PASS); its red path is proven (see log: Harness).
 - Production state: not defined yet.
 - Quirks: `get-security-info` now resets the app itself; console bytes printed while the port is closed are lost; 32-bit `native_sim` does not link on this PC.
 
@@ -85,3 +85,9 @@ Dated, append-only. A card line points here for its reason.
 
 - 2026-09-30 (verified on this PC): Google Chrome 154.0.8037.92 (.deb, `/usr/bin/google-chrome`), BlueZ 5.85, controller `hci0` `<hci0-mac-redacted>` powered, not rfkill-blocked; session is Wayland (`DISPLAY=:0`, `WAYLAND_DISPLAY=wayland-0`).
 - 2026-09-30 (verified, headless probe served from `http://localhost`): without `--enable-experimental-web-platform-features` Chrome reports `'bluetooth' in navigator` = false; with the flag `navigator.bluetooth.getAvailability()` = true. `localhost` counts as a secure context.
+
+### Harness
+
+- 2026-09-30 (ticket 02, this project's image, MD5 5af085eb6016fbcb5958e29dd9ca6990): `./verify.sh <&-` (stdin closed) ran build, guard, identify (`chip_id=13`), reset + capture, `[BOOT] reason=usb at +2.062s`: `RESULT: PASS (4/4 checks)`, exit 0, 4 s. `./verify.sh --flash` added `build.sh flash` (`MD5 相符: 5af085eb...`) before the capture: `RESULT: PASS (5/5 checks)`, exit 0, 7 s. The capture log is kept at `build/verify/capture-<stamp>.log`.
+- 2026-09-30 red paths, all exit 1: `./verify.sh --seconds 1` (window ends before the 2 s boot delay, board run) gave `FAIL [BOOT] reason=<cause> present (no [BOOT] reason= marker in 26 captured line(s))` and `RESULT: FAIL (3/4 checks)`; `./verify.sh --replay <log without the [BOOT] line>` gave the same FAIL and `RESULT: FAIL (0/1 checks)`; the lock held by another `flock` gave `harness: board busy` and `RESULT: FAIL (0/0 checks)`; `PYTHONPATH=<dir with esptool.py>` made the build and the guard Check FAIL (`RESULT: FAIL (0/2 checks)`) before any board access.
+- 2026-09-30: `--replay LOG` runs only the capture Checks over a saved log (lines before a `stale line(s)` note are dropped, as the live capture drops them): no board, no lock, no build. A capture window shorter than the boot marker delay is the cheapest on-board red path.

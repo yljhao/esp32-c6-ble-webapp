@@ -13,7 +13,8 @@
 #                               same capture WITHOUT a reset; --send types a serial-shell command first
 #   ./build.sh guard            run the esptool guard alone (spec: No upstream esptool)
 #   ./build.sh test [ARGS...]   host unit suites: twister over tests/ on native_sim, no board, then the
-#                               esptool guard's own red-path test; exits non-zero on any failure.
+#                               esptool guard's own red-path test, then the Harness Check unit tests;
+#                               exits non-zero on any failure.
 #                               Extra ARGS go to twister, e.g. --sub-test c6.smoke.smoke.test_arithmetic_holds
 #
 # Environment: C6_PORT (default /dev/ttyACM0), C6_BUILD_DIR (default build),
@@ -147,6 +148,8 @@ cmd_test() {
     --outdir "$out" --clobber-output --inline-logs --no-detailed-test-id "$@"
   echo "build.sh: host suites passed (report: $out/twister.json)"
   "$ROOT/tools/test_esptool_guard.sh"
+  # Harness Check logic (Python unittest, project venv; no board)
+  "$(venv_python)" -m unittest discover -s "$ROOT/tools/verify" -v
 }
 
 case "${1:-}" in
@@ -157,5 +160,5 @@ case "${1:-}" in
   serial)   shift; cmd_serial "$@" ;;
   console)  shift; cmd_console "$@" ;;
   test)     shift; cmd_test "$@" ;;
-  *)        sed -n '2,22p' "$0" | sed 's/^# \{0,1\}//'; exit 2 ;;
+  *)        sed -n '2,23p' "$0" | sed 's/^# \{0,1\}//'; exit 2 ;;
 esac
