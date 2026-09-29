@@ -21,4 +21,13 @@ config C6_HANG_CMD
 	  the next boot report "[BOOT] reason=watchdog". Enabled by debug.conf
 	  in a separate build directory; never in the production image.
 
+config C6_HEAP_REPORT
+	bool "Debug: print the kernel heap statistics every 5 s"
+	default n
+	select SYS_HEAP_RUNTIME_STATS
+	help
+	  Adds src/debug_heap.c. Enabled by analyze.conf (with the thread
+	  analyzer) in a build directory of its own; never in the production
+	  image.
+
 source "Kconfig.zephyr"

@@ -24,15 +24,23 @@ Checks so far (pure logic in checks.py, unit-tested by test_checks.py):
   [--flash] build.sh flash; `[BOOT] reason=<cause>` present in the capture; Self-test done
   (and its readbacks at 0, 128, 255 in tolerance); `[LED] brightness=128` after it with duty
   50 +- 1 % low and freq near 20 kHz; `[WDT] armed window=5000ms` after the Self-test; marker order
-  [BOOT] -> selftest -> [LED] -> [WDT]; the production build carries no hang command.
+  [BOOT] -> selftest -> [LED] -> [WDT] -> [BLE] advertising; the production build carries no hang command.
+  Then, as a Central (bleak) with the console recorded meanwhile (BackgroundCapture): the board is found by
+  name and NUS UUID; connect + subscribe; console `[BLE] connected` then `[BLE] mtu=247`; a second scan while
+  connected does not see the board (link stays up; an attempt whose link the PC's radio dropped during the
+  scan is repeated, at most 3 attempts) and the console shows no advertising while the Connection exists;
+  disconnect -> `[BLE] disconnected reason=0x13` and advertising again; found again, reconnect with the same
+  markers; final disconnect leaves the board advertising.
 """
 import argparse
+import asyncio
 import datetime
 import fcntl
 import os
 import re
 import subprocess
 import sys
+import threading
 import time
 
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
@@ -51,6 +59,14 @@ BITE_LIMIT_S = 7.0          # window 5 s, the last feed is up to 1 s old: 4..5 s
 BITE_CAPTURE_S = 25.0       # hang marker + bite + 2 s boot delay, with margin
 REFUSED_WINDOW_S = 8.0
 CAPTURE_WINDOW_S = 20.0
+BLE_MTU = 247                # spec: ATT MTU raised to 247
+BLE_REMOTE_TERMINATED = 0x13 # HCI reason the board sees when the Central disconnects
+BLE_SCAN_S = 10.0            # find the board: many advertising intervals (100 to 150 ms)
+BLE_HIDDEN_SCAN_S = 3.0      # second scan while connected; shorter = less radio time taken from the link
+BLE_MARKER_WAIT_S = 5.0      # a marker follows its cause within this
+BLE_HIDDEN_ATTEMPTS = 3      # the PC's radio can drop the link while it scans; see run_ble
+BLE_SCENARIO_S = 120.0       # bound on the whole Central scenario
+BLE_LOG_TAIL_S = 1.0         # keep capturing this long after the last step
 LOCK_WAIT_S = 5.0
 # Bounds on the build.sh calls (the Harness never waits for ever while it holds the lock):
 BUILD_TIMEOUT_S = {"build": 900, "guard": 60, "identify": 60, "flash": 180}
@@ -68,11 +84,79 @@ A_SELFTEST = "[STAGE] selftest: done"
 A_SELFTEST_RB = "Self-test Duty readbacks at 0, 128, 255 in tolerance"
 A_BOOT_LED = "[LED] brightness=128 after the Self-test, duty 50 +- 1 % low, freq near 20 kHz"
 A_WDT = "[WDT] armed window=5000ms after the Self-test"
-A_ORDER = "marker order: [BOOT] -> selftest -> [LED] -> [WDT]"
+A_BLE_ADV = "[BLE] advertising name=XIAO-C6-LED after [WDT] armed"
+A_ORDER = "marker order: [BOOT] -> selftest -> [LED] -> [WDT] -> [BLE] advertising"
+A_BLE_FOUND = "Central finds the board by name XIAO-C6-LED and NUS UUID"
+A_BLE_CONNECT = "Central connects and subscribes to NUS notifications"
+A_BLE_MARKERS = "console: [BLE] connected, then [BLE] mtu=247"
+A_BLE_HIDDEN = "second scan while connected does not see the board (link stays up)"
+A_BLE_SILENT = "console: no [BLE] advertising while the Connection exists"
+A_BLE_DISC = "Central disconnects: console [BLE] disconnected reason=0x13, then advertising again"
+A_BLE_REFOUND = "Central finds the board again after the disconnect"
+A_BLE_RECONNECT = "Central reconnects: console [BLE] connected, then [BLE] mtu=247"
+A_BLE_LEFT = "final disconnect leaves the board advertising"
 A_NOHANG = "production build carries no hang command"
 A_SOAK = "idle: no reset (no spurious watchdog bite)"
 A_BITE = "debug image: hang command leads to a reset within ~5 s, next boot reason=watchdog"
 A_REFUSED = "production image: hang command refused, no reset"
+
+
+class BackgroundCapture:
+    """A console capture (no reset) in a thread, so the board's markers are recorded while the
+    Harness acts as a Central. `lines` grows as the board prints (list.append is atomic);
+    `mark()` / `since(mark)` slice it. The capture ends at stop() or after `seconds`."""
+
+    def __init__(self, port, log_path, seconds):
+        self.port, self.log_path, self.seconds = port, log_path, seconds
+        self.lines = []
+        self.error = None
+        self._ready = threading.Event()
+        self._stop = threading.Event()
+        self._thread = threading.Thread(target=self._run, name="console-capture", daemon=True)
+
+    def _run(self):
+        try:
+            with open(self.log_path, "w") as f:
+                def sink(t, w, s):
+                    self.lines.append((t, w, s))
+                    f.write(console.fmt(t, w, s) + "\n")
+                    f.flush()
+                console.capture(self.port, self.seconds, do_reset=False, sink=sink,
+                                on_ready=self._ready.set, stop_event=self._stop)
+        except BaseException as e:      # reported by start()/stop(), never lost in the thread
+            self.error = e
+        finally:
+            self._ready.set()
+
+    def start(self, ready_timeout=5.0):
+        self._thread.start()
+        if not self._ready.wait(ready_timeout) or self.error:
+            self._stop.set()
+            raise OSError(f"console capture did not start: {self.error or 'timeout'}")
+
+    def stop(self, tail_s=0.0):
+        time.sleep(tail_s)
+        self._stop.set()
+        self._thread.join(10.0)
+        if self._thread.is_alive():
+            raise OSError("console capture thread did not stop")
+        if self.error:
+            raise OSError(f"console capture failed: {self.error}")
+
+    def mark(self):
+        return len(self.lines)
+
+    def since(self, mark):
+        return list(self.lines[mark:])
+
+    async def wait_check(self, mark, check, timeout):
+        """Poll `check(lines since mark)` until it passes or `timeout` s; returns its last (ok, detail)."""
+        deadline = time.monotonic() + timeout
+        while True:
+            ok, detail = check(self.since(mark))
+            if ok or time.monotonic() >= deadline:
+                return ok, detail
+            await asyncio.sleep(0.05)
 
 
 class Harness:
@@ -181,6 +265,7 @@ class Harness:
         self.check(A_SELFTEST_RB, *checks.check_selftest_readbacks(self.lines))
         self.check(A_BOOT_LED, *checks.check_boot_brightness(self.lines))
         self.check(A_WDT, *checks.check_wdt_armed(self.lines))
+        self.check(A_BLE_ADV, *checks.check_ble_advertising(self.lines))
         self.check(A_ORDER, *checks.check_marker_order(self.lines))
 
     def check_production_has_no_hang(self):
@@ -193,6 +278,114 @@ class Harness:
         except OSError as e:
             return self.check(A_NOHANG, False, str(e))
         return self.check(A_NOHANG, *checks.check_no_hang_command(cfg, image))
+
+    # -- the Harness as a Central (glue; the decisions are in central_logic.py / checks.py) --
+    def run_ble(self):
+        """Advertising and one Connection, proven as a Central with the console recorded meanwhile."""
+        os.makedirs(os.path.join(BUILD_DIR, "verify"), exist_ok=True)
+        stamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+        self.log_path = os.path.join(BUILD_DIR, "verify", f"ble-{stamp}.log")
+        cap = BackgroundCapture(self.args.port, self.log_path, BLE_SCENARIO_S + 30.0)
+        try:
+            cap.start()
+        except OSError as e:
+            return self.check("console capture (Bluetooth scenario)", False, str(e))
+        try:
+            asyncio.run(asyncio.wait_for(self.ble_scenario(cap), BLE_SCENARIO_S))
+        except asyncio.TimeoutError:
+            self.check("Bluetooth scenario finishes", False, f"not done after {BLE_SCENARIO_S:.0f} s")
+        except Exception as e:      # bleak / BlueZ / D-Bus: report what was seen, exactly
+            self.check("Bluetooth scenario runs", False, f"{type(e).__name__}: {e}")
+        finally:
+            try:
+                cap.stop(BLE_LOG_TAIL_S)
+            except OSError as e:
+                self.check("console capture (Bluetooth scenario)", False, str(e))
+        print(f"captured {len(cap.lines)} lines -> {self.log_path}", flush=True)
+
+    async def ble_scenario(self, cap):
+        import central
+
+        dev = None
+        conn = None
+        try:
+            t0 = time.monotonic()
+            dev = await central.find_board(BLE_SCAN_S)
+            if not self.check(A_BLE_FOUND, dev is not None,
+                              f"{dev.address} in {time.monotonic() - t0:.1f} s" if dev else
+                              f"no advertisement with the name and UUID in {BLE_SCAN_S:.0f} s"):
+                return
+
+            # Connect; a second scan while connected must not see the board. The PC's radio can
+            # drop the link while it scans (supervision timeout on the board, reason 0x08), which
+            # says nothing about the firmware, so an attempt whose link dropped is repeated; a
+            # scan that sees the board while the link is up fails at once.
+            hidden_ok, hidden_detail = False, ""
+            for attempt in range(1, BLE_HIDDEN_ATTEMPTS + 1):
+                note = f" (attempt {attempt})" if attempt > 1 else ""
+                mark = cap.mark()
+                conn = central.CentralConnection(dev)
+                t0 = time.monotonic()
+                await conn.open()
+                connect = (conn.connected, f"connected in {time.monotonic() - t0:.1f} s, "
+                           f"write payload {conn.write_payload} bytes{note}")
+                markers = await cap.wait_check(mark, lambda ls: checks.check_ble_connected(ls, BLE_MTU),
+                                               BLE_MARKER_WAIT_S)
+                t0 = time.monotonic()
+                seen = await central.find_board(BLE_HIDDEN_SCAN_S)
+                if seen is not None:
+                    hidden_ok, hidden_detail = False, f"scan saw {seen.address} while the link was up"
+                    break
+                if conn.connected:
+                    hidden_ok = True
+                    hidden_detail = (f"no advertisement in {time.monotonic() - t0:.1f} s of scanning, "
+                                     f"link still up{note}")
+                    break
+                hidden_detail = f"the link dropped during the scan in all {attempt} attempt(s)"
+                await conn.close()
+                await cap.wait_check(mark, lambda ls: checks.check_ble_disconnected(ls, None), BLE_MARKER_WAIT_S)
+                # the board advertises again; a fresh scan gives BlueZ the device back
+                dev = await central.find_board(BLE_SCAN_S)
+                if dev is None:
+                    hidden_detail += "; the board did not advertise again"
+                    break
+            self.check(A_BLE_CONNECT, *connect)
+            self.check(A_BLE_MARKERS, *markers)
+            self.check(A_BLE_HIDDEN, hidden_ok, hidden_detail)
+            if conn is None or not conn.connected:
+                return
+
+            await conn.close()
+            ok, detail = await cap.wait_check(mark, lambda ls: checks.check_ble_disconnected(ls, BLE_REMOTE_TERMINATED),
+                                              BLE_MARKER_WAIT_S)
+            self.check(A_BLE_DISC, ok, detail)
+            self.check(A_BLE_SILENT, *checks.check_ble_silent_while_connected(cap.since(mark)))
+
+            # Advertising again: the Central finds the board and reconnects.
+            t0 = time.monotonic()
+            dev = await central.find_board(BLE_SCAN_S)
+            if not self.check(A_BLE_REFOUND, dev is not None,
+                              f"{dev.address} in {time.monotonic() - t0:.1f} s" if dev else
+                              f"not advertising again within {BLE_SCAN_S:.0f} s"):
+                return
+            mark = cap.mark()
+            conn = central.CentralConnection(dev)
+            await conn.open()
+            ok, detail = await cap.wait_check(mark, lambda ls: checks.check_ble_connected(ls, BLE_MTU),
+                                              BLE_MARKER_WAIT_S)
+            self.check(A_BLE_RECONNECT, ok and conn.connected, detail)
+
+            await conn.close()
+            ok, detail = await cap.wait_check(mark, lambda ls: checks.check_ble_disconnected(ls, BLE_REMOTE_TERMINATED),
+                                              BLE_MARKER_WAIT_S)
+            self.check(A_BLE_LEFT, ok, detail)
+        finally:
+            # Never leave the one Connection up: it hides the board from the next run.
+            if conn is not None and conn.connected:
+                try:
+                    await conn.close()
+                except Exception as e:
+                    print(f"harness: closing the Connection failed: {type(e).__name__}: {e}", flush=True)
 
     # -- separate modes ----------------------------------------------------
     def run_soak(self):
@@ -274,6 +467,7 @@ class Harness:
             return self.finish()
         self.capture_checks()
         self.check_production_has_no_hang()
+        self.run_ble()
         return self.finish()
 
 

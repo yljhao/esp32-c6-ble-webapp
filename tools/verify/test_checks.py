@@ -60,6 +60,12 @@ RB_128 = "[LED] brightness=128 duty=50.1% freq=19998"
 RB_255 = "[LED] brightness=255 duty=100.0% freq=0"
 WDT = "[WDT] armed window=5000ms"
 GOOD = [BOOT, START, RB_0, RB_128, RB_255, DONE, RB_128, WDT]
+ADV = "[BLE] advertising name=XIAO-C6-LED"
+CONNECTED = "[BLE] connected"
+MTU_DEFAULT = "[BLE] mtu=23"
+MTU_247 = "[BLE] mtu=247"
+DISCONNECTED = "[BLE] disconnected reason=0x13"
+GOOD_BOOT = GOOD + [ADV]
 
 
 class LedMarker(unittest.TestCase):
@@ -153,8 +159,8 @@ class BootBrightness(unittest.TestCase):
 
 
 class MarkerOrder(unittest.TestCase):
-    def test_boot_selftest_led_in_order_passes(self):
-        ok, detail = checks.check_marker_order(cap(*GOOD))
+    def test_boot_selftest_led_watchdog_advertising_in_order_passes(self):
+        ok, detail = checks.check_marker_order(cap(*GOOD_BOOT))
         self.assertTrue(ok, detail)
 
     def test_led_before_selftest_done_fails(self):
@@ -171,7 +177,7 @@ class MarkerOrder(unittest.TestCase):
         self.assertIn("[LED]", detail)
 
     def test_watchdog_before_the_boot_brightness_fails(self):
-        ok, _ = checks.check_marker_order(cap(BOOT, START, DONE, WDT, RB_128))
+        ok, _ = checks.check_marker_order(cap(BOOT, START, DONE, WDT, RB_128, ADV))
         self.assertFalse(ok)
 
     def test_missing_watchdog_marker_names_it(self):
@@ -179,21 +185,164 @@ class MarkerOrder(unittest.TestCase):
         self.assertFalse(ok)
         self.assertIn("[WDT]", detail)
 
+    def test_advertising_before_the_watchdog_fails(self):
+        ok, _ = checks.check_marker_order(cap(BOOT, START, DONE, RB_128, ADV, WDT))
+        self.assertFalse(ok)
+
+    def test_missing_advertising_marker_names_it(self):
+        ok, detail = checks.check_marker_order(cap(*GOOD))
+        self.assertFalse(ok)
+        self.assertIn("[BLE] advertising", detail)
+
 
 class BootCaptureStop(unittest.TestCase):
-    def test_stops_on_the_watchdog_marker_after_selftest_only(self):
+    def test_stops_on_the_advertising_marker_after_the_watchdog(self):
         stop = checks.BootCaptureDone()
-        fired = [stop(t) for t in GOOD]
-        self.assertEqual(fired, [False] * 7 + [True])
+        fired = [stop(t) for t in GOOD_BOOT]
+        self.assertEqual(fired, [False] * 8 + [True])
 
-    def test_a_watchdog_marker_before_the_selftest_end_does_not_stop(self):
+    def test_the_watchdog_marker_alone_does_not_stop(self):
         stop = checks.BootCaptureDone()
-        self.assertFalse(stop(WDT))
+        self.assertFalse([stop(t) for t in GOOD][-1])
+
+    def test_an_advertising_marker_before_the_watchdog_does_not_stop(self):
+        stop = checks.BootCaptureDone()
+        self.assertFalse(any(stop(t) for t in (BOOT, START, DONE, RB_128, ADV)))
+
+    def test_an_advertising_marker_before_the_selftest_end_does_not_stop(self):
+        stop = checks.BootCaptureDone()
+        self.assertFalse(stop(ADV))
 
     def test_stops_after_a_selftest_failure_too(self):
         stop = checks.BootCaptureDone()
-        fired = [stop(t) for t in (BOOT, START, "[STAGE] selftest: fail step=1", RB_128, WDT)]
-        self.assertEqual(fired, [False, False, False, False, True])
+        fired = [stop(t) for t in (BOOT, START, "[STAGE] selftest: fail step=1", RB_128, WDT, ADV)]
+        self.assertEqual(fired, [False] * 5 + [True])
+
+
+class BleAdvertising(unittest.TestCase):
+    def test_marker_after_the_watchdog_passes(self):
+        ok, detail = checks.check_ble_advertising(cap(*GOOD_BOOT))
+        self.assertTrue(ok, detail)
+        self.assertIn("name=XIAO-C6-LED", detail)
+
+    def test_missing_marker_fails(self):
+        ok, detail = checks.check_ble_advertising(cap(*GOOD))
+        self.assertFalse(ok)
+        self.assertIn("no [BLE] advertising", detail)
+
+    def test_wrong_name_fails(self):
+        ok, _ = checks.check_ble_advertising(cap(*GOOD, "[BLE] advertising name=Zephyr"))
+        self.assertFalse(ok)
+
+    def test_start_failure_marker_is_named(self):
+        ok, detail = checks.check_ble_advertising(cap(*GOOD, "[BLE] start failed err=-12"))
+        self.assertFalse(ok)
+        self.assertIn("start failed err=-12", detail)
+
+    def test_marker_before_the_watchdog_fails(self):
+        ok, _ = checks.check_ble_advertising(cap(BOOT, START, DONE, ADV, RB_128, WDT))
+        self.assertFalse(ok)
+
+
+class BleConnected(unittest.TestCase):
+    def test_connected_then_mtu_247_passes(self):
+        ok, detail = checks.check_ble_connected(cap(MTU_DEFAULT, CONNECTED, MTU_247), 247)
+        self.assertTrue(ok, detail)
+        self.assertIn("mtu=247", detail)
+
+    def test_the_default_mtu_before_connected_is_not_the_negotiated_one(self):
+        ok, _ = checks.check_ble_connected(cap(MTU_247, CONNECTED), 247)
+        self.assertFalse(ok)
+
+    def test_no_connected_marker_fails(self):
+        ok, detail = checks.check_ble_connected(cap(ADV), 247)
+        self.assertFalse(ok)
+        self.assertIn("[BLE] connected", detail)
+
+    def test_no_mtu_after_connected_fails(self):
+        ok, detail = checks.check_ble_connected(cap(CONNECTED), 247)
+        self.assertFalse(ok)
+        self.assertIn("[BLE] mtu=", detail)
+
+    def test_the_default_mtu_only_fails_and_names_it(self):
+        ok, detail = checks.check_ble_connected(cap(CONNECTED, MTU_DEFAULT), 247)
+        self.assertFalse(ok)
+        self.assertIn("mtu=23", detail)
+
+    def test_the_last_mtu_counts(self):
+        ok, _ = checks.check_ble_connected(cap(CONNECTED, MTU_DEFAULT, MTU_247), 247)
+        self.assertTrue(ok)
+
+    def test_a_smaller_mtu_than_asked_fails(self):
+        ok, _ = checks.check_ble_connected(cap(CONNECTED, "[BLE] mtu=185"), 247)
+        self.assertFalse(ok)
+
+    def test_noise_that_only_contains_the_marker_is_ignored(self):
+        ok, _ = checks.check_ble_connected(cap("x [BLE] connected", "x [BLE] mtu=247"), 247)
+        self.assertFalse(ok)
+
+
+class BleNotAdvertisingWhileConnected(unittest.TestCase):
+    def test_no_advertising_between_connected_and_disconnected_passes(self):
+        ok, detail = checks.check_ble_silent_while_connected(cap(ADV, CONNECTED, MTU_247, DISCONNECTED, ADV))
+        self.assertTrue(ok, detail)
+
+    def test_advertising_inside_the_connection_fails(self):
+        ok, detail = checks.check_ble_silent_while_connected(cap(CONNECTED, ADV, DISCONNECTED))
+        self.assertFalse(ok)
+        self.assertIn("advertising", detail)
+
+    def test_needs_both_markers(self):
+        self.assertFalse(checks.check_ble_silent_while_connected(cap(CONNECTED, MTU_247))[0])
+        self.assertFalse(checks.check_ble_silent_while_connected(cap(DISCONNECTED))[0])
+
+
+class BleDisconnected(unittest.TestCase):
+    def test_disconnected_then_advertising_passes(self):
+        ok, detail = checks.check_ble_disconnected(cap(CONNECTED, DISCONNECTED, ADV), 0x13)
+        self.assertTrue(ok, detail)
+        self.assertIn("reason=0x13", detail)
+
+    def test_no_disconnected_marker_fails(self):
+        ok, detail = checks.check_ble_disconnected(cap(CONNECTED), 0x13)
+        self.assertFalse(ok)
+        self.assertIn("[BLE] disconnected", detail)
+
+    def test_advertising_missing_after_disconnect_fails(self):
+        ok, detail = checks.check_ble_disconnected(cap(CONNECTED, DISCONNECTED), 0x13)
+        self.assertFalse(ok)
+        self.assertIn("[BLE] advertising", detail)
+
+    def test_advertising_only_before_the_disconnect_does_not_count(self):
+        ok, _ = checks.check_ble_disconnected(cap(ADV, CONNECTED, DISCONNECTED), 0x13)
+        self.assertFalse(ok)
+
+    def test_a_reason_other_than_the_expected_one_fails(self):
+        ok, detail = checks.check_ble_disconnected(cap(CONNECTED, "[BLE] disconnected reason=0x08", ADV), 0x13)
+        self.assertFalse(ok)
+        self.assertIn("0x08", detail)
+
+    def test_any_reason_is_accepted_when_none_is_expected(self):
+        ok, _ = checks.check_ble_disconnected(cap(CONNECTED, "[BLE] disconnected reason=0x08", ADV), None)
+        self.assertTrue(ok)
+
+    def test_advertising_later_than_the_bound_fails(self):
+        lines = [(0.0, None, CONNECTED), (1.0, None, DISCONNECTED), (3.5, None, ADV)]
+        ok, detail = checks.check_ble_disconnected(lines, 0x13)
+        self.assertFalse(ok)
+        self.assertIn("2.500s", detail)
+
+    def test_advertising_within_the_bound_passes(self):
+        lines = [(0.0, None, CONNECTED), (1.0, None, DISCONNECTED), (1.9, None, ADV)]
+        self.assertTrue(checks.check_ble_disconnected(lines, 0x13)[0])
+
+    def test_the_bound_can_be_widened(self):
+        lines = [(0.0, None, CONNECTED), (1.0, None, DISCONNECTED), (3.5, None, ADV)]
+        self.assertTrue(checks.check_ble_disconnected(lines, 0x13, max_delay_s=5.0)[0])
+
+    def test_a_reason_that_is_not_a_number_fails(self):
+        ok, _ = checks.check_ble_disconnected(cap(CONNECTED, "[BLE] disconnected reason=x", ADV), None)
+        self.assertFalse(ok)
 
 
 class WatchdogArmed(unittest.TestCase):

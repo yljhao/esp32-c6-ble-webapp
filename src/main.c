@@ -2,12 +2,14 @@
 /*
  * Boot order (spec): Reset reason marker -> Self-test (a failure is
  * reported, not retried, the boot continues) -> Brightness 128 -> watchdog
- * armed. Later tickets add Bluetooth and the main loop's Heartbeats.
+ * armed -> Bluetooth enabled and advertising. Later tickets add the Shell link and the
+ * main loop's Heartbeats.
  */
 
 #include <zephyr/kernel.h>
 #include <zephyr/sys/printk.h>
 
+#include "ble.h"
 #include "brightness.h"
 #include "debug_hang.h"
 #include "reset_reason.h"
@@ -40,6 +42,11 @@ int main(void)
 	 * against the window. A failure is logged inside; the board then runs unguarded.
 	 */
 	(void)watchdog_arm();
+
+	/* Bluetooth after the watchdog (spec boot order). A failure is reported inside; the
+	 * board then runs without a radio.
+	 */
+	(void)ble_start();
 
 	/* The main loop is the only feeder (spec). It feeds once per 1 s period against
 	 * the 5 s window; the Harness expects a bite 4 to 5 s after the hang, so anything a

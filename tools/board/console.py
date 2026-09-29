@@ -37,7 +37,7 @@ def _open(port):
 
 
 def capture(port, seconds, do_reset=True, stop_when=None, sink=None, on_ready=None, linger=0.0,
-            send=None):
+            send=None, stop_event=None):
     """Capture for `seconds` (0 = forever) or until stop_when(text) is true,
     plus `linger` seconds after that. sink(t_rel, wallclock, text) is called
     per line as it arrives; on_ready() once the port is open (and the reset
@@ -45,7 +45,9 @@ def capture(port, seconds, do_reset=True, stop_when=None, sink=None, on_ready=No
     console drops bytes while the port is closed).
     `send` (bytes) is written to the port once it is open, after on_ready:
     the Harness types a serial-shell command with it and captures the
-    board's response, no reset (the board keeps running)."""
+    board's response, no reset (the board keeps running).
+    `stop_event` (a threading.Event) ends the capture when set: the Harness runs the capture in a
+    thread while it acts as a Central, and stops it once the Central is done."""
     lines = []
     ser = _open(port)
     buf = b""
@@ -67,6 +69,8 @@ def capture(port, seconds, do_reset=True, stop_when=None, sink=None, on_ready=No
         stop_at = None   # monotonic time to return at once stop_when has fired
         while True:
             if seconds and time.monotonic() - t0 >= seconds:
+                break
+            if stop_event is not None and stop_event.is_set():
                 break
             if stop_at is not None and time.monotonic() >= stop_at:
                 break

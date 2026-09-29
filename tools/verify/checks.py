@@ -13,6 +13,12 @@ SELFTEST_FAIL_RE = re.compile(r"^\[STAGE\] selftest: fail step=(\d+)\s*$")
 LED_RE = re.compile(r"^\[LED\] brightness=(\d+) duty=(\d+(?:\.\d+)?)% freq=(\d+)\s*$")
 
 WDT_ARMED = "[WDT] armed window=5000ms"
+BLE_NAME = "XIAO-C6-LED"
+BLE_ADVERTISING = f"[BLE] advertising name={BLE_NAME}"
+BLE_CONNECTED = "[BLE] connected"
+BLE_MTU_RE = re.compile(r"^\[BLE\] mtu=(\d+)\s*$")
+BLE_DISCONNECTED_RE = re.compile(r"^\[BLE\] disconnected reason=(0x[0-9a-fA-F]+|\d+)\s*$")
+BLE_START_FAILED_RE = re.compile(r"^\[BLE\] (start failed|advertising failed) err=(-?\d+)\s*$")
 ROM_BANNER = "ESP-ROM:"
 HANG_MARKER = "[DBG] hang: main loop stops feeding"
 # The watchdog bites 5 s after the last feed; the main loop feeds once a second, so the
@@ -161,6 +167,102 @@ def check_wdt_armed(lines):
     return True, f"{WDT_ARMED} at +{lines[k][0]:.3f}s"
 
 
+def _is_ble_advertising(text):
+    return text.strip() == BLE_ADVERTISING
+
+
+def _is_ble_connected(text):
+    return text.strip() == BLE_CONNECTED
+
+
+def _is_ble_disconnected(text):
+    return text.startswith("[BLE] disconnected")
+
+
+def check_ble_advertising(lines):
+    """`[BLE] advertising name=XIAO-C6-LED` after the watchdog was armed (boot order)."""
+    w = _first(lines, _is_wdt_armed)
+    if w is None:
+        return False, f"no {WDT_ARMED} marker to order Bluetooth after"
+    k = _first(lines, _is_ble_advertising, w + 1)
+    if k is not None:
+        return True, f"{BLE_ADVERTISING} at +{lines[k][0]:.3f}s"
+    for t, _, text in lines[w + 1:]:
+        m = BLE_START_FAILED_RE.match(text)
+        if m:
+            return False, f"{text.strip()} at +{t:.3f}s"
+    if _first(lines, _is_ble_advertising) is not None:
+        return False, f"{BLE_ADVERTISING} printed before {WDT_ARMED} (must come after)"
+    return False, f"no {BLE_ADVERTISING} marker after {WDT_ARMED}"
+
+
+def _last_mtu_after(lines, start):
+    """(index, value) of the last `[BLE] mtu=<n>` line after `start`, else None."""
+    found = None
+    for i in range(start + 1, len(lines)):
+        m = BLE_MTU_RE.match(lines[i][2])
+        if m:
+            found = (i, int(m.group(1)))
+    return found
+
+
+def check_ble_connected(lines, expected_mtu):
+    """`[BLE] connected`, then `[BLE] mtu=<n>` with n == expected_mtu. The stack also reports
+    the default 23 when it creates the connection; the last MTU after `connected` is the
+    negotiated one."""
+    c = _first(lines, _is_ble_connected)
+    if c is None:
+        return False, f"no {BLE_CONNECTED} marker in {len(lines)} captured line(s)"
+    mtu = _last_mtu_after(lines, c)
+    if mtu is None:
+        return False, f"{BLE_CONNECTED} at +{lines[c][0]:.3f}s but no [BLE] mtu= marker after it"
+    i, n = mtu
+    if n != expected_mtu:
+        return False, f"[BLE] mtu={n} after {BLE_CONNECTED}, expected mtu={expected_mtu}"
+    return True, f"{BLE_CONNECTED} at +{lines[c][0]:.3f}s, [BLE] mtu={n} at +{lines[i][0]:.3f}s"
+
+
+def check_ble_silent_while_connected(lines):
+    """No `[BLE] advertising` marker between `[BLE] connected` and the next `[BLE] disconnected`:
+    the board does not advertise while a Connection exists."""
+    c = _first(lines, _is_ble_connected)
+    if c is None:
+        return False, f"no {BLE_CONNECTED} marker"
+    d = _first(lines, _is_ble_disconnected, c + 1)
+    if d is None:
+        return False, "no [BLE] disconnected marker after connected, cannot bound the Connection"
+    for t, _, text in lines[c + 1:d]:
+        if text.startswith("[BLE] advertising"):
+            return False, f"'{text.strip()}' at +{t:.3f}s while the Connection existed"
+    return True, f"no advertising marker in the {lines[d][0] - lines[c][0]:.1f}s of the Connection"
+
+
+BLE_ADVERTISE_AGAIN_S = 1.0   # spec: advertises again "as soon as" a Connection ends
+
+
+def check_ble_disconnected(lines, expected_reason, max_delay_s=BLE_ADVERTISE_AGAIN_S):
+    """`[BLE] disconnected reason=<r>` (r == expected_reason unless it is None), then
+    `[BLE] advertising name=XIAO-C6-LED` again after it, within `max_delay_s`."""
+    d = _first(lines, _is_ble_disconnected)
+    if d is None:
+        return False, "no [BLE] disconnected marker"
+    m = BLE_DISCONNECTED_RE.match(lines[d][2])
+    if not m:
+        return False, f"unparsable marker '{lines[d][2].strip()}'"
+    reason = int(m.group(1), 0)
+    if expected_reason is not None and reason != expected_reason:
+        return False, f"{lines[d][2].strip()}, expected reason=0x{expected_reason:02x}"
+    a = _first(lines, _is_ble_advertising, d + 1)
+    if a is None:
+        return False, f"{lines[d][2].strip()} but no {BLE_ADVERTISING} marker after it"
+    delay = lines[a][0] - lines[d][0]
+    if delay > max_delay_s:
+        return False, (f"{lines[d][2].strip()} but advertising again only {delay:.3f}s later, "
+                       f"limit {max_delay_s:g}s")
+    return True, (f"reason=0x{reason:02x} at +{lines[d][0]:.3f}s, advertising again at "
+                  f"+{lines[a][0]:.3f}s ({lines[a][0] - lines[d][0]:.3f}s later)")
+
+
 def check_idle_no_bite(lines, min_s, observed_s=None):
     """No reset in at least `min_s` seconds after the watchdog was armed. A reset shows as a
     ROM banner or a second `[BOOT] reason=` line after the armed marker. `observed_s` is how
@@ -233,11 +335,12 @@ def check_hang_refused(lines, window_s, observed_s=None):
 
 
 def check_marker_order(lines):
-    """[BOOT] reason= -> [STAGE] selftest: start -> selftest end -> [LED] brightness=128 -> [WDT] armed."""
+    """[BOOT] reason= -> [STAGE] selftest: start -> selftest end -> [LED] brightness=128 -> [WDT] armed
+    -> [BLE] advertising."""
     steps = [("[BOOT] reason=", is_boot_line), ("[STAGE] selftest: start", _is_start),
              ("[STAGE] selftest: done|fail", _is_selftest_end),
              ("[LED] brightness=128", lambda t: (parse_led(t) or (None,))[0] == 128),
-             (WDT_ARMED, _is_wdt_armed)]
+             (WDT_ARMED, _is_wdt_armed), (BLE_ADVERTISING, _is_ble_advertising)]
     at = -1
     for name, pred in steps:
         i = _first(lines, pred, at + 1)
@@ -248,18 +351,22 @@ def check_marker_order(lines):
 
 
 class BootCaptureDone:
-    """Capture stop predicate: the boot is complete once `[WDT] armed window=5000ms`
-    follows the Self-test's end marker (done or fail); the boot's `[LED] brightness=128`
-    precedes it."""
+    """Capture stop predicate: the boot is complete once `[BLE] advertising name=...` follows
+    `[WDT] armed window=5000ms`, which follows the Self-test's end marker (done or fail); the
+    boot's `[LED] brightness=128` precedes them."""
 
     def __init__(self):
         self.ended = False
+        self.armed = False
 
     def __call__(self, text):
         if _is_selftest_end(text):
             self.ended = True
             return False
-        return self.ended and _is_wdt_armed(text)
+        if self.ended and _is_wdt_armed(text):
+            self.armed = True
+            return False
+        return self.armed and _is_ble_advertising(text)
 
 
 def format_check(name, ok, detail=""):

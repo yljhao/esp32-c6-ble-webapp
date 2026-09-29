@@ -26,8 +26,8 @@ import central_logic as cl
 # Bounds, seconds. A scan must outlast several advertising intervals; the connect bound covers
 # BlueZ's own connection procedure; a shell reply comes within a fraction of a second on the
 # board, so 3 s means "lost"; a disconnect or a write that takes 5 s means the link is stuck.
-# None of these is measured yet: the first ticket with `Board: required` that uses them
-# confirms or corrects them (board-notes).
+# Measured on the board (ticket 06, board-notes): the scan finds the board in 0.1 to 0.3 s, a
+# connect with service discovery takes about 2 s, so these bounds stay as they are.
 DEFAULT_SCAN_S = 10.0
 DEFAULT_CONNECT_S = 15.0
 DEFAULT_REPLY_S = 3.0
