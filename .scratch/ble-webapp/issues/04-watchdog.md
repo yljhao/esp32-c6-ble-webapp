@@ -8,7 +8,7 @@ Spec: `.scratch/ble-webapp/spec.md` (watchdog, Boot order). Reference watchdog m
 
 **Board:** required
 
-**Status:** ready-for-agent
+**Status:** done
 
 - [x] Boot prints `[WDT] armed window=5000ms` after `[STAGE] selftest: done`.
   Evidence: `./verify.sh --flash` capture `build/verify/capture-20260930-042551.log`: `[STAGE] selftest: done` +3.605 s, `[WDT] armed window=5000ms` +3.626 s (`RESULT: PASS (11/11 checks)`).
