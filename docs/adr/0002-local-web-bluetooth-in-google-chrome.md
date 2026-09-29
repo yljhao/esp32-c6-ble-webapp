@@ -1,0 +1,3 @@
+# Local Web App testing runs in Google Chrome (.deb), not Firefox or snap Chromium
+
+Firefox does not implement Web Bluetooth at all, so the local check before Bluefy runs in Google Chrome installed from Google's .deb. Ubuntu ships Chromium only as a snap, whose confinement needs `snap connect chromium:bluez` and is a common failure point for Web Bluetooth on Linux; Playwright drives the installed Chrome with `channel="chrome"`. Chrome on Linux exposes `navigator.bluetooth` only with `--enable-experimental-web-platform-features` (verified on this PC 2026-09-30, Chrome 154.0.8037.92: without it `'bluetooth' in navigator` is false; with it `getAvailability()` is true), so automation passes the flag on launch and a manual run needs it set in `chrome://flags`.
