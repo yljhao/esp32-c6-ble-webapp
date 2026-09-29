@@ -8,7 +8,7 @@ Spec: `.scratch/ble-webapp/spec.md` (Shell link, Wire contract, Brightness rules
 
 **Board:** required
 
-**Status:** ready-for-agent
+**Status:** done
 
 - [x] `led set 0`, `led set 128`, `led set 255` over the Shell link each reply exactly `LED <n>` and print `[LED] brightness=<n> duty=...` with the Duty readback in tolerance (0 and 255 constant levels, 128 → 50 ± 1 % low).
 - [x] `led set 300`, `led set abc` and `led set` reply a line starting `ERR ` and the Brightness is unchanged (`led get` confirms).
