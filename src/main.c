@@ -41,15 +41,19 @@ int main(void)
 	 */
 	(void)watchdog_arm();
 
+	/* The main loop is the only feeder (spec). It feeds once per 1 s period against
+	 * the 5 s window; the Harness expects a bite 4 to 5 s after the hang, so anything a
+	 * later ticket adds to this loop must keep one pass well under the window.
+	 */
 	while (1) {
 		k_msleep(1000);
 		if (debug_hang_requested()) {
-			/* Debug image only: stop feeding for good; the watchdog must reset the board. */
-			/* Leading newline: the shell prompt may be on the line. */
+			/* Debug image only: stop feeding for good; the watchdog must reset the board.
+			 * Leading newline: the shell prompt may be on the line.
+			 */
 			printk("\n[DBG] hang: main loop stops feeding\n");
 			k_sleep(K_FOREVER);
 		}
-		/* The main loop is the only feeder (spec). */
 		watchdog_feed();
 	}
 	return 0;

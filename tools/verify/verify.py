@@ -84,6 +84,7 @@ class Harness:
         self.t_start = time.monotonic()
         self.build_dir = BUILD_DIR
         self.build_env = {}
+        self.capture_elapsed = 0.0   # measured length of the last capture
 
     def check(self, name, ok, detail=""):
         self.results.append((name, bool(ok), detail))
@@ -144,9 +145,11 @@ class Harness:
             def sink(t, w, s):
                 f.write(console.fmt(t, w, s) + "\n")
                 f.flush()
+            t0 = time.monotonic()
             lines = console.capture(self.args.port, seconds, do_reset=do_reset, stop_when=stop_when,
                                     sink=sink, send=send)
-        print(f"captured {len(lines)} lines -> {self.log_path}", flush=True)
+            self.capture_elapsed = time.monotonic() - t0
+        print(f"captured {len(lines)} lines in {self.capture_elapsed:.1f} s -> {self.log_path}", flush=True)
         return lines
 
     def step_capture(self, seconds=None, stop_when="boot"):
@@ -197,7 +200,7 @@ class Harness:
         seconds = SOAK_BOOT_SLACK_S + self.args.soak
         print(f"soak: capturing {seconds:.0f} s after the reset", flush=True)
         self.step_capture(seconds=seconds, stop_when=None)
-        self.check(A_SOAK, *checks.check_idle_no_bite(self.lines, self.args.soak, observed_s=seconds))
+        self.check(A_SOAK, *checks.check_idle_no_bite(self.lines, self.args.soak, observed_s=self.capture_elapsed))
 
     def run_bite(self):
         """Watchdog bite scenario on the debug image, then the production image is restored."""
@@ -238,7 +241,7 @@ class Harness:
         except (OSError, TimeoutError) as e:
             self.check("console capture (production image)", False, str(e))
             return
-        self.check(A_REFUSED, *checks.check_hang_refused(lines, REFUSED_WINDOW_S, observed_s=REFUSED_WINDOW_S))
+        self.check(A_REFUSED, *checks.check_hang_refused(lines, REFUSED_WINDOW_S, observed_s=self.capture_elapsed))
 
     def finish(self):
         if self.log_path:
