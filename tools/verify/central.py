@@ -60,6 +60,8 @@ class CentralConnection:
         self._replies = asyncio.Queue()
         self.heartbeats = []         # central_logic.Sample, oldest first
         self.other_lines = []        # (t, raw) lines that are neither Heartbeat nor reply
+        self.raw = bytearray()       # every notification byte received (the clean-stream Check reads it)
+        self.lines = []              # central_logic.Line, every line received, oldest first
         self.disconnected = asyncio.Event()
         self.disconnected_at = None  # clock() when the link dropped, else None
 
@@ -79,7 +81,10 @@ class CentralConnection:
         self._gatt = BleakClient(self._device, disconnected_callback=self._on_disconnect, timeout=timeout)
         await self._gatt.connect()
         try:
-            await self._gatt.start_notify(cl.NUS_TX_UUID, self._on_notify)
+            # AcquireNotify (a file descriptor of our own) instead of bleak's default StartNotify:
+            # after a link that was lost (not closed by us) BlueZ keeps the old notify session,
+            # and the next StartNotify then delivers every notification twice (measured, ticket 07).
+            await self._gatt.start_notify(cl.NUS_TX_UUID, self._on_notify, bluez={"use_start_notify": False})
         except BaseException:
             await self.close()       # never leave the one Connection up behind a failed open
             raise
@@ -105,8 +110,10 @@ class CentralConnection:
 
     def _on_notify(self, _characteristic, data):
         now = self._clock()
+        self.raw += bytes(data)
         for text in self._reasm.feed(data):
             line = cl.classify_line(text)
+            self.lines.append(line)
             if line.kind == cl.HEARTBEAT:
                 self.heartbeats.append(cl.Sample(now, line.seq, line.uptime_ms))
             elif line.kind in (cl.LED, cl.ERR):

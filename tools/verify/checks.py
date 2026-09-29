@@ -136,6 +136,47 @@ def _boot_led(lines):
     return None
 
 
+def check_led_applied(lines, brightness):
+    """A Brightness applied over a link shows on the console as `[LED] brightness=<n> duty=..`
+    in tolerance (0 and 255 constant, 128 at 50 +- 1 % low). Only those three levels have a
+    tolerance defined; any other is refused rather than passed unchecked."""
+    if brightness not in (0, 128, 255):
+        return False, f"no tolerance defined for brightness={brightness}"
+    for t, _, text in lines:
+        led = parse_led(text)
+        if led and led[0] == brightness:
+            _, duty, freq = led
+            detail = f"[LED] brightness={brightness} duty={duty}% freq={freq} at +{t:.3f}s"
+            if not _led_ok(brightness, duty, freq):
+                return False, detail + " out of tolerance"
+            return True, detail
+    return False, f"no [LED] brightness={brightness} marker in {len(lines)} captured line(s)"
+
+
+def check_no_led_marker(lines):
+    """No `[LED] brightness=` marker: a rejected command applied nothing."""
+    for t, _, text in lines:
+        if parse_led(text):
+            return False, f"'{text.strip()}' at +{t:.3f}s after a rejected command"
+    return True, f"no [LED] marker in {len(lines)} captured line(s)"
+
+
+_REPLY_RE = re.compile(r"^(LED \d+|ERR .*)$")
+
+
+def check_serial_led_replies(lines, want):
+    """`led` commands typed on the serial shell. `want` lists the reply lines expected, in order:
+    `LED <n>` exactly, or `ERR` for any line starting `ERR `. The shell echoes each command behind
+    its prompt, so only lines that ARE a reply count (a line starting `LED ` or `ERR `)."""
+    got = [text.strip() for _, _, text in lines if _REPLY_RE.match(text.strip())]
+    if len(got) < len(want):
+        return False, f"{len(got)} reply line(s) {got}, expected {len(want)} replies {want}"
+    for i, (g, w) in enumerate(zip(got, want)):
+        if not (g.startswith("ERR ") if w == "ERR" else g == w):
+            return False, f"reply {i + 1} is '{g}', expected '{w}'"
+    return True, f"{len(want)} replies: {got[:len(want)]}"
+
+
 def check_boot_brightness(lines):
     """After the Self-test the boot leaves Brightness 128: `[LED] brightness=128` with duty
     50 +- 1 % low and the frequency near 20 kHz."""

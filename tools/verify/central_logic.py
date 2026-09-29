@@ -179,3 +179,43 @@ def chunk_for_mtu(data, mtu):
     if size < 1:
         raise ValueError(f"ATT MTU {mtu} leaves no room for data")
     return [data[i:i + size] for i in range(0, len(data), size)]
+
+
+def expect_led_reply(reply, brightness):
+    """The reply to a command that must succeed: `LED <brightness>` exactly. `reply` is a Reply,
+    or None when none came. Returns (ok, detail)."""
+    if reply is None:
+        return False, "no reply line"
+    if not reply.ok:
+        return False, f"ERR {reply.message}, expected LED {brightness}"
+    if reply.brightness != brightness:
+        return False, f"LED {reply.brightness}, expected LED {brightness}"
+    return True, f"LED {reply.brightness}"
+
+
+def expect_err_reply(reply):
+    """The reply to a command that must be rejected: a line starting `ERR `."""
+    if reply is None:
+        return False, "no reply line"
+    if reply.ok:
+        return False, f"LED {reply.brightness}, expected an ERR line"
+    return True, f"ERR {reply.message}"
+
+
+def check_clean_stream(raw, lines):
+    """Nothing but reply and Heartbeat lines on the Shell link (spec: no echo, prompt or escape
+    sequences). `raw` is every byte received, `lines` the Line tuples classified from it. Fails on
+    an escape byte, a carriage return, a line that is neither reply nor Heartbeat (an echo, a
+    prompt, a blank line) and a stream that stops mid-line. An empty stream is no evidence."""
+    if not raw:
+        return False, "nothing received, so nothing to judge"
+    if b"\x1b" in raw:
+        return False, f"escape byte 0x1b in the stream at offset {raw.index(b'\x1b')}"
+    if b"\r" in raw:
+        return False, f"carriage return in the stream at offset {raw.index(b'\r')}"
+    if not raw.endswith(b"\n"):
+        return False, f"stream ends without an end of line: {raw.rsplit(b'\n', 1)[-1]!r}"
+    for line in lines:
+        if line.kind == OTHER:
+            return False, f"line that is neither reply nor Heartbeat: {line.raw!r}"
+    return True, f"{len(lines)} line(s), all replies or Heartbeats, {len(raw)} bytes"

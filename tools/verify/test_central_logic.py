@@ -334,6 +334,99 @@ class WriteEncoding(unittest.TestCase):
             cl.chunk_for_mtu(b"a", 3)
 
 
+class ExpectedReplies(unittest.TestCase):
+    """Ticket 07: what a Check accepts as the answer to `led set` / `led get`."""
+
+    def test_led_reply_with_the_wanted_value_passes(self):
+        ok, detail = cl.expect_led_reply(cl.Reply(True, 128, None), 128)
+        self.assertTrue(ok)
+        self.assertIn("LED 128", detail)
+
+    def test_led_reply_with_another_value_fails_and_names_both(self):
+        ok, detail = cl.expect_led_reply(cl.Reply(True, 127, None), 128)
+        self.assertFalse(ok)
+        self.assertIn("LED 127", detail)
+        self.assertIn("128", detail)
+
+    def test_error_reply_where_a_value_is_wanted_fails(self):
+        ok, detail = cl.expect_led_reply(cl.Reply(False, None, "out of range 0-255"), 128)
+        self.assertFalse(ok)
+        self.assertIn("ERR out of range 0-255", detail)
+
+    def test_no_reply_fails(self):
+        ok, detail = cl.expect_led_reply(None, 0)
+        self.assertFalse(ok)
+        self.assertIn("no reply", detail)
+
+    def test_err_reply_passes_where_a_rejection_is_wanted(self):
+        ok, detail = cl.expect_err_reply(cl.Reply(False, None, "not a number"))
+        self.assertTrue(ok)
+        self.assertIn("ERR not a number", detail)
+
+    def test_led_reply_where_a_rejection_is_wanted_fails(self):
+        ok, detail = cl.expect_err_reply(cl.Reply(True, 255, None))
+        self.assertFalse(ok)
+        self.assertIn("LED 255", detail)
+
+    def test_no_reply_where_a_rejection_is_wanted_fails(self):
+        ok, _ = cl.expect_err_reply(None)
+        self.assertFalse(ok)
+
+
+class CleanStream(unittest.TestCase):
+    """Ticket 07: nothing but reply lines (and Heartbeats) on the Shell link."""
+
+    def lines(self, raw):
+        r = cl.LineReassembler()
+        return [cl.classify_line(t) for t in r.feed(raw)]
+
+    def test_replies_and_heartbeats_only_is_clean(self):
+        raw = b'LED 128\nERR out of range 0-255\n{"seq":1,"uptime_ms":1000}\n'
+        ok, detail = cl.check_clean_stream(raw, self.lines(raw))
+        self.assertTrue(ok, detail)
+        self.assertIn("3 line", detail)
+
+    def test_prompt_text_is_not_clean(self):
+        raw = b"uart:~$ LED 1\n"
+        ok, detail = cl.check_clean_stream(raw, self.lines(raw))
+        self.assertFalse(ok)
+        self.assertIn("uart:~$", detail)
+
+    def test_echo_of_the_command_is_not_clean(self):
+        raw = b"led get\nLED 1\n"
+        ok, detail = cl.check_clean_stream(raw, self.lines(raw))
+        self.assertFalse(ok)
+        self.assertIn("led get", detail)
+
+    def test_escape_sequence_is_not_clean(self):
+        raw = b"\x1b[1;32mLED 1\x1b[m\n"
+        ok, detail = cl.check_clean_stream(raw, self.lines(raw))
+        self.assertFalse(ok)
+        self.assertIn("escape", detail)
+
+    def test_carriage_return_is_not_clean(self):
+        raw = b"LED 1\r\n"
+        ok, detail = cl.check_clean_stream(raw, self.lines(raw))
+        self.assertFalse(ok)
+        self.assertIn("carriage return", detail)
+
+    def test_blank_line_is_not_clean(self):
+        raw = b"\nLED 1\n"
+        ok, _ = cl.check_clean_stream(raw, self.lines(raw))
+        self.assertFalse(ok)
+
+    def test_unfinished_last_line_is_not_clean(self):
+        raw = b"LED 1\nLED"
+        ok, detail = cl.check_clean_stream(raw, self.lines(raw))
+        self.assertFalse(ok)
+        self.assertIn("end of line", detail)
+
+    def test_empty_stream_is_not_clean_evidence(self):
+        ok, detail = cl.check_clean_stream(b"", [])
+        self.assertFalse(ok)
+        self.assertIn("nothing", detail)
+
+
 class NoHardware(unittest.TestCase):
     def imported_modules(self, module):
         code = ("import sys; sys.path.insert(0, %r); import %s; "

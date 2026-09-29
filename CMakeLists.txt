@@ -18,6 +18,10 @@ target_sources(app PRIVATE
   src/brightness.c
   src/watchdog.c
   src/ble.c
+  src/led_command.c
+  src/led_shell.c
+  src/nus_chunk.c
+  src/shell_nus.c
 )
 target_sources_ifdef(CONFIG_C6_HANG_CMD app PRIVATE src/debug_hang.c)
 target_sources_ifdef(CONFIG_C6_HEAP_REPORT app PRIVATE src/debug_heap.c)

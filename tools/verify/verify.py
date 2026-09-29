@@ -31,6 +31,10 @@ Checks so far (pure logic in checks.py, unit-tested by test_checks.py):
   scan is repeated, at most 3 attempts) and the console shows no advertising while the Connection exists;
   disconnect -> `[BLE] disconnected reason=0x13` and advertising again; found again, reconnect with the same
   markers; final disconnect leaves the board advertising.
+  Shell link (ticket 07), a second Central scenario: `led set 0|128|255` reply exactly `LED <n>` and print
+  `[LED]` with the Duty readback in tolerance; `led set 300`, `led set abc`, `led set` reply `ERR ` and apply
+  nothing (`led get` unchanged); the received stream holds nothing but reply lines; after a disconnect and
+  reconnect `led get` returns the value set before; then the same `led` commands typed on the serial shell.
 """
 import argparse
 import asyncio
@@ -66,6 +70,9 @@ BLE_HIDDEN_SCAN_S = 3.0      # second scan while connected; shorter = less radio
 BLE_MARKER_WAIT_S = 5.0      # a marker follows its cause within this
 BLE_HIDDEN_ATTEMPTS = 3      # the PC's radio can drop the link while it scans; see run_ble
 BLE_SCENARIO_S = 120.0       # bound on the whole Central scenario
+SHELL_MARKER_WAIT_S = 3.0    # an applied Brightness prints its [LED] marker within this
+SHELL_SETTLE_S = 0.3         # after a rejected command, wait this long for a marker that must not come
+SHELL_SERIAL_S = 10.0        # bound on typing the `led` commands on the serial shell
 BLE_LOG_TAIL_S = 1.0         # keep capturing this long after the last step
 LOCK_WAIT_S = 5.0
 # Bounds on the build.sh calls (the Harness never waits for ever while it holds the lock):
@@ -95,6 +102,14 @@ A_BLE_DISC = "Central disconnects: console [BLE] disconnected reason=0x13, then 
 A_BLE_REFOUND = "Central finds the board again after the disconnect"
 A_BLE_RECONNECT = "Central reconnects: console [BLE] connected, then [BLE] mtu=247"
 A_BLE_LEFT = "final disconnect leaves the board advertising"
+A_SHELL_FOUND = "Shell link: Central finds the board and connects"
+A_SHELL_CLEAN = "Shell link: nothing but reply lines arrives (no echo, prompt, escape sequence or CR)"
+A_SHELL_PERSIST = "Shell link: after disconnect and reconnect `led get` returns the value set before"
+A_SHELL_RESTORE = "Shell link: `led set 128` on the second Connection restores the boot level"
+A_SHELL_LEFT = "Shell link: final disconnect leaves the board advertising"
+A_SERIAL_LED = "serial shell: `led set` / `led get` reply as on the Shell link"
+A_SERIAL_MARKERS = "serial shell: `led set 0`, `255`, `128` print [LED] with Duty readback in tolerance"
+A_SERIAL_ERR = "serial shell: only the three applied commands print [LED] (`led set 300|abc|<none>` apply nothing)"
 A_NOHANG = "production build carries no hang command"
 A_SOAK = "idle: no reset (no spurious watchdog bite)"
 A_BITE = "debug image: hang command leads to a reset within ~5 s, next boot reason=watchdog"
@@ -333,7 +348,7 @@ class Harness:
                                                BLE_MARKER_WAIT_S)
                 t0 = time.monotonic()
                 seen = await central.find_board(BLE_HIDDEN_SCAN_S)
-                if seen is not None:
+                if seen is not None and conn.connected:
                     hidden_ok, hidden_detail = False, f"scan saw {seen.address} while the link was up"
                     break
                 if conn.connected:
@@ -386,6 +401,137 @@ class Harness:
                     await conn.close()
                 except Exception as e:
                     print(f"harness: closing the Connection failed: {type(e).__name__}: {e}", flush=True)
+
+    # -- the Shell link (ticket 07) ----------------------------------------------
+    def run_shell_link(self):
+        """`led` commands over the Shell link with the console recorded meanwhile, then the same
+        commands on the serial shell."""
+        os.makedirs(os.path.join(BUILD_DIR, "verify"), exist_ok=True)
+        stamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+        self.log_path = os.path.join(BUILD_DIR, "verify", f"shell-{stamp}.log")
+        cap = BackgroundCapture(self.args.port, self.log_path, BLE_SCENARIO_S + 30.0)
+        try:
+            cap.start()
+        except OSError as e:
+            return self.check("console capture (Shell link scenario)", False, str(e))
+        try:
+            asyncio.run(asyncio.wait_for(self.shell_scenario(cap), BLE_SCENARIO_S))
+        except asyncio.TimeoutError:
+            self.check("Shell link scenario finishes", False, f"not done after {BLE_SCENARIO_S:.0f} s")
+        except Exception as e:
+            self.check("Shell link scenario runs", False, f"{type(e).__name__}: {e}")
+        finally:
+            try:
+                cap.stop(BLE_LOG_TAIL_S)
+            except OSError as e:
+                self.check("console capture (Shell link scenario)", False, str(e))
+        print(f"captured {len(cap.lines)} lines -> {self.log_path}", flush=True)
+        self.run_serial_led()
+
+    @staticmethod
+    async def ask(conn, command):
+        """The Reply to a command, or None when no reply line came in time."""
+        try:
+            return await conn.request(command)
+        except asyncio.TimeoutError:
+            return None
+
+    async def shell_scenario(self, cap):
+        import central
+        import central_logic as cl
+
+        conn = None
+        try:
+            dev = await central.find_board(BLE_SCAN_S)
+            if dev is None:
+                self.check(A_SHELL_FOUND, False, f"no advertisement in {BLE_SCAN_S:.0f} s")
+                return
+            conn = central.CentralConnection(dev)
+            await conn.open()
+            if not self.check(A_SHELL_FOUND, conn.connected, f"{dev.address}"):
+                return
+
+            # led set 0 / 128 / 255: exact reply and the console's Duty readback.
+            for n in (0, 128, 255):
+                mark = cap.mark()
+                reply = await self.ask(conn, f"led set {n}")
+                ok, detail = cl.expect_led_reply(reply, n)
+                self.check(f"led set {n} over the Shell link replies exactly LED {n}", ok, detail)
+                ok, detail = await cap.wait_check(mark, lambda ls, n=n: checks.check_led_applied(ls, n),
+                                                  SHELL_MARKER_WAIT_S)
+                self.check(f"led set {n} over the Shell link prints [LED] brightness={n}, Duty readback in tolerance",
+                           ok, detail)
+
+            # Rejected input: ERR line, no [LED] marker, Brightness unchanged (still 255).
+            for cmd in ("led set 300", "led set abc", "led set"):
+                mark = cap.mark()
+                reply = await self.ask(conn, cmd)
+                ok_err, d_err = cl.expect_err_reply(reply)
+                await asyncio.sleep(SHELL_SETTLE_S)
+                ok_mark, d_mark = checks.check_no_led_marker(cap.since(mark))
+                ok_get, d_get = cl.expect_led_reply(await self.ask(conn, "led get"), 255)
+                self.check(f"`{cmd}` over the Shell link replies ERR, applies nothing, `led get` still LED 255",
+                           ok_err and ok_mark and ok_get,
+                           f"{d_err}; {d_mark}; led get: {d_get}")
+
+            self.check(A_SHELL_CLEAN, *cl.check_clean_stream(bytes(conn.raw), conn.lines))
+
+            # Disconnect, reconnect: the Brightness set before is still there.
+            mark = cap.mark()
+            await conn.close()
+            await cap.wait_check(mark, lambda ls: checks.check_ble_disconnected(ls, None), BLE_MARKER_WAIT_S)
+            dev = await central.find_board(BLE_SCAN_S)
+            if dev is None:
+                self.check(A_SHELL_PERSIST, False, "the board did not advertise again")
+                return
+            conn = central.CentralConnection(dev)
+            await conn.open()
+            ok, detail = cl.expect_led_reply(await self.ask(conn, "led get"), 255)
+            self.check(A_SHELL_PERSIST, ok, detail)
+
+            # Put the boot level back; the second Connection's stream must be clean too.
+            mark = cap.mark()
+            ok, detail = cl.expect_led_reply(await self.ask(conn, "led set 128"), 128)
+            ok_led, d_led = await cap.wait_check(mark, lambda ls: checks.check_led_applied(ls, 128),
+                                                 SHELL_MARKER_WAIT_S)
+            self.check(A_SHELL_RESTORE, ok and ok_led, f"{detail}; {d_led}")
+            ok_clean, d_clean = cl.check_clean_stream(bytes(conn.raw), conn.lines)
+            self.check(A_SHELL_CLEAN + " (second Connection)", ok_clean, d_clean)
+
+            mark = cap.mark()
+            await conn.close()
+            ok, detail = await cap.wait_check(mark, lambda ls: checks.check_ble_disconnected(ls, BLE_REMOTE_TERMINATED),
+                                              BLE_MARKER_WAIT_S)
+            self.check(A_SHELL_LEFT, ok, detail)
+        finally:
+            if conn is not None and conn.connected:
+                try:
+                    await conn.close()
+                except Exception as e:
+                    print(f"harness: closing the Connection failed: {type(e).__name__}: {e}", flush=True)
+
+    def run_serial_led(self):
+        """The same commands typed on the serial shell (the console keeps every command)."""
+        want = ["LED 0", "LED 0", "LED 255", "ERR", "ERR", "ERR", "LED 255", "LED 128"]
+        # Two short bursts: the serial shell's RX ring (with echo and the colour codes it prints)
+        # overflows on about 80 bytes typed at once ("RX ring buffer full"), which loses commands.
+        bursts = [(b"led set 0\r\nled get\r\nled set 255\r\nled set 300\r\n", lambda t: t.startswith("ERR ")),
+                  (b"led set abc\r\nled set\r\nled get\r\nled set 128\r\n", lambda t: t.strip() == "LED 128")]
+        lines = []
+        for n, (script, stop) in enumerate(bursts, 1):
+            try:
+                lines += self.capture_to_log(SHELL_SERIAL_S, False, stop_when=stop, send=script,
+                                             tag=f"serial-led{n}")
+            except (OSError, TimeoutError) as e:
+                self.check("console capture (serial shell)", False, str(e))
+                return
+        self.check(A_SERIAL_LED, *checks.check_serial_led_replies(lines, want))
+        detail = "; ".join(checks.check_led_applied(lines, b)[1] for b in (0, 255, 128))
+        self.check(A_SERIAL_MARKERS, all(checks.check_led_applied(lines, b)[0] for b in (0, 255, 128)), detail)
+        # eight commands, three applied (0, 255, 128): the three rejected ones must not print a marker
+        markers = [text.strip() for _, _, text in lines if checks.parse_led(text)]
+        self.check(A_SERIAL_ERR, [m.split()[1] for m in markers] == ["brightness=0", "brightness=255", "brightness=128"],
+                   f"{len(markers)} [LED] marker(s): {markers}")
 
     # -- separate modes ----------------------------------------------------
     def run_soak(self):
@@ -468,6 +614,7 @@ class Harness:
         self.capture_checks()
         self.check_production_has_no_hang()
         self.run_ble()
+        self.run_shell_link()
         return self.finish()
 
 

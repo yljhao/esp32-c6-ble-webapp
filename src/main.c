@@ -2,7 +2,7 @@
 /*
  * Boot order (spec): Reset reason marker -> Self-test (a failure is
  * reported, not retried, the boot continues) -> Brightness 128 -> watchdog
- * armed -> Bluetooth enabled and advertising. Later tickets add the Shell link and the
+ * armed -> Shell link started -> Bluetooth enabled and advertising. A later ticket adds the
  * main loop's Heartbeats.
  */
 
@@ -14,6 +14,7 @@
 #include "debug_hang.h"
 #include "reset_reason.h"
 #include "selftest.h"
+#include "shell_nus.h"
 #include "user_led.h"
 #include "watchdog.h"
 
@@ -42,6 +43,11 @@ int main(void)
 	 * against the window. A failure is logged inside; the board then runs unguarded.
 	 */
 	(void)watchdog_arm();
+
+	/* The Shell link's shell thread before Bluetooth, so a command written by the first Central
+	 * finds it running. A failure is reported inside; the serial shell still works.
+	 */
+	(void)shell_nus_start();
 
 	/* Bluetooth after the watchdog (spec boot order). A failure is reported inside; the
 	 * board then runs without a radio.

@@ -124,6 +124,6 @@ uint32_t user_led_expected_low_permille(uint8_t brightness)
 
 void user_led_print_marker(uint8_t brightness, const struct duty_readback *rb)
 {
-	printk("[LED] brightness=%u duty=%u.%u%% freq=%u\n", brightness,
+	printk("\n[LED] brightness=%u duty=%u.%u%% freq=%u\n", brightness,
 	       rb->low_permille / 10U, rb->low_permille % 10U, rb->freq_hz);
 }

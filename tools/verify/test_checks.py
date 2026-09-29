@@ -511,5 +511,78 @@ class Result(unittest.TestCase):
         self.assertEqual(checks.format_check("boot", False, ""), "FAIL  boot")
 
 
+class LedApplied(unittest.TestCase):
+    """Ticket 07: a Brightness set over the Shell link shows on the console with a Duty readback."""
+
+    def test_each_level_in_tolerance_passes(self):
+        for b, duty, freq in ((0, "0.0", 0), (128, "50.1", 19998), (255, "100.0", 0)):
+            ok, detail = checks.check_led_applied(cap(f"[LED] brightness={b} duty={duty}% freq={freq}"), b)
+            self.assertTrue(ok, detail)
+
+    def test_missing_marker_fails(self):
+        ok, detail = checks.check_led_applied(cap("LED 128"), 128)
+        self.assertFalse(ok)
+        self.assertIn("no [LED] brightness=128", detail)
+
+    def test_other_brightness_marker_does_not_count(self):
+        ok, _ = checks.check_led_applied(cap("[LED] brightness=0 duty=0.0% freq=0"), 128)
+        self.assertFalse(ok)
+
+    def test_out_of_tolerance_readback_fails(self):
+        ok, detail = checks.check_led_applied(cap("[LED] brightness=128 duty=60.0% freq=19998"), 128)
+        self.assertFalse(ok)
+        self.assertIn("out of tolerance", detail)
+
+    def test_level_without_a_tolerance_is_refused(self):
+        ok, detail = checks.check_led_applied(cap("[LED] brightness=64 duty=25.0% freq=19998"), 64)
+        self.assertFalse(ok)
+        self.assertIn("no tolerance", detail)
+
+
+class NoLedMarker(unittest.TestCase):
+    def test_no_marker_passes(self):
+        ok, _ = checks.check_no_led_marker(cap("something", "ERR x"))
+        self.assertTrue(ok)
+
+    def test_a_marker_fails_and_names_it(self):
+        ok, detail = checks.check_no_led_marker(cap("[LED] brightness=255 duty=100.0% freq=0"))
+        self.assertFalse(ok)
+        self.assertIn("brightness=255", detail)
+
+
+class SerialLedReplies(unittest.TestCase):
+    """Ticket 07: the same `led` commands typed on the serial shell."""
+
+    TYPED = ("uart:~$ led set 0", "[LED] brightness=0 duty=0.0% freq=0", "LED 0", "uart:~$ led get",
+               "LED 0", "uart:~$ led set 300", "ERR out of range 0-255", "uart:~$ led get", "LED 0",
+               "uart:~$ led set 128", "[LED] brightness=128 duty=50.1% freq=19998", "LED 128")
+    WANT = ["LED 0", "LED 0", "ERR", "LED 0", "LED 128"]
+
+    def test_replies_in_order_pass(self):
+        ok, detail = checks.check_serial_led_replies(cap(*self.TYPED), self.WANT)
+        self.assertTrue(ok, detail)
+
+    def test_err_entry_matches_any_error_line(self):
+        lines = cap("ERR not a number")
+        self.assertTrue(checks.check_serial_led_replies(lines, ["ERR"])[0])
+
+    def test_command_echo_is_not_a_reply(self):
+        # "uart:~$ led get" contains "led get" but is not a reply line
+        ok, _ = checks.check_serial_led_replies(cap("uart:~$ led get"), ["LED 0"])
+        self.assertFalse(ok)
+
+    def test_missing_reply_fails_and_says_which(self):
+        ok, detail = checks.check_serial_led_replies(cap(*self.TYPED[:-3]), self.WANT)
+        self.assertFalse(ok)
+        self.assertIn("5 replies", detail)
+
+    def test_wrong_value_fails(self):
+        lines = cap("LED 1")
+        ok, detail = checks.check_serial_led_replies(lines, ["LED 0"])
+        self.assertFalse(ok)
+        self.assertIn("LED 1", detail)
+
+
+
 if __name__ == "__main__":
     unittest.main()
