@@ -30,8 +30,8 @@ static bool readback_ok(uint8_t brightness, const struct duty_readback *rb)
 }
 
 /* Ramp to target, taking a readback at every point on the way up. Returns 0,
- * or the 1-based readback step that failed; a driver error reports the step
- * being worked on (0 before the first readback).
+ * or the 1-based readback step that failed; a driver error reports the
+ * readback step it was heading for (never 0, which means success).
  */
 static int sweep_to(uint8_t from, uint8_t to, int *step)
 {
@@ -43,7 +43,7 @@ static int sweep_to(uint8_t from, uint8_t to, int *step)
 
 		if (ret < 0) {
 			LOG_ERR("user_led_set(%d): %d", b, ret);
-			return *step;
+			return *step + 1;
 		}
 
 		for (size_t i = 0; i < ARRAY_SIZE(readback_points); i++) {

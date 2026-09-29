@@ -31,6 +31,7 @@ int main(void)
 	(void)user_led_init();
 	(void)selftest_run();
 
+	/* A failure is logged inside; no [LED] marker then, which the Harness reports. */
 	(void)brightness_set(BRIGHTNESS_BOOT);
 
 	while (1) {

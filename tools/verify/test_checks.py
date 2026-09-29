@@ -55,10 +55,10 @@ class BootMarker(unittest.TestCase):
 BOOT = "[BOOT] reason=usb"
 START = "[STAGE] selftest: start"
 DONE = "[STAGE] selftest: done"
-LED0 = "[LED] brightness=0 duty=0.0% freq=0"
-LED128 = "[LED] brightness=128 duty=50.1% freq=19998"
-LED255 = "[LED] brightness=255 duty=100.0% freq=0"
-GOOD = [BOOT, START, LED0, LED128, LED255, DONE, LED128]
+RB_0 = "[LED] brightness=0 duty=0.0% freq=0"
+RB_128 = "[LED] brightness=128 duty=50.1% freq=19998"
+RB_255 = "[LED] brightness=255 duty=100.0% freq=0"
+GOOD = [BOOT, START, RB_0, RB_128, RB_255, DONE, RB_128]
 
 
 class LedMarker(unittest.TestCase):
@@ -77,7 +77,7 @@ class SelftestDone(unittest.TestCase):
         self.assertTrue(ok, detail)
 
     def test_fail_marker_fails_and_names_the_step(self):
-        ok, detail = checks.check_selftest_done(cap(BOOT, START, LED0, "[STAGE] selftest: fail step=2", LED128))
+        ok, detail = checks.check_selftest_done(cap(BOOT, START, RB_0, "[STAGE] selftest: fail step=2", RB_128))
         self.assertFalse(ok)
         self.assertIn("fail step=2", detail)
 
@@ -101,23 +101,23 @@ class SelftestReadbacks(unittest.TestCase):
         self.assertTrue(ok, detail)
 
     def test_missing_point_fails(self):
-        ok, detail = checks.check_selftest_readbacks(cap(BOOT, START, LED0, LED255, DONE, LED128))
+        ok, detail = checks.check_selftest_readbacks(cap(BOOT, START, RB_0, RB_255, DONE, RB_128))
         self.assertFalse(ok)
         self.assertIn("128", detail)
 
     def test_constant_level_with_edges_fails(self):
         ok, _ = checks.check_selftest_readbacks(
-            cap(BOOT, START, "[LED] brightness=0 duty=0.0% freq=20000", LED128, LED255, DONE))
+            cap(BOOT, START, "[LED] brightness=0 duty=0.0% freq=20000", RB_128, RB_255, DONE))
         self.assertFalse(ok)
 
     def test_wrong_constant_level_fails(self):
         ok, _ = checks.check_selftest_readbacks(
-            cap(BOOT, START, LED0, LED128, "[LED] brightness=255 duty=0.0% freq=0", DONE))
+            cap(BOOT, START, RB_0, RB_128, "[LED] brightness=255 duty=0.0% freq=0", DONE))
         self.assertFalse(ok)
 
     def test_midpoint_out_of_tolerance_fails(self):
         ok, _ = checks.check_selftest_readbacks(
-            cap(BOOT, START, LED0, "[LED] brightness=128 duty=53.0% freq=19998", LED255, DONE))
+            cap(BOOT, START, RB_0, "[LED] brightness=128 duty=53.0% freq=19998", RB_255, DONE))
         self.assertFalse(ok)
 
 
@@ -128,7 +128,7 @@ class BootBrightness(unittest.TestCase):
         self.assertIn("brightness=128", detail)
 
     def test_the_selftest_128_readback_does_not_count(self):
-        ok, _ = checks.check_boot_brightness(cap(BOOT, START, LED0, LED128, LED255, DONE))
+        ok, _ = checks.check_boot_brightness(cap(BOOT, START, RB_0, RB_128, RB_255, DONE))
         self.assertFalse(ok)
 
     def test_duty_out_of_tolerance_fails(self):
@@ -147,7 +147,7 @@ class BootBrightness(unittest.TestCase):
             self.assertFalse(ok, freq)
 
     def test_a_selftest_failure_does_not_hide_the_boot_brightness(self):
-        ok, _ = checks.check_boot_brightness(cap(BOOT, START, "[STAGE] selftest: fail step=1", LED128))
+        ok, _ = checks.check_boot_brightness(cap(BOOT, START, "[STAGE] selftest: fail step=1", RB_128))
         self.assertTrue(ok)
 
 
@@ -157,11 +157,11 @@ class MarkerOrder(unittest.TestCase):
         self.assertTrue(ok, detail)
 
     def test_led_before_selftest_done_fails(self):
-        ok, _ = checks.check_marker_order(cap(BOOT, START, LED128, DONE))
+        ok, _ = checks.check_marker_order(cap(BOOT, START, RB_128, DONE))
         self.assertFalse(ok)
 
     def test_selftest_before_boot_fails(self):
-        ok, _ = checks.check_marker_order(cap(START, DONE, BOOT, LED128))
+        ok, _ = checks.check_marker_order(cap(START, DONE, BOOT, RB_128))
         self.assertFalse(ok)
 
     def test_missing_marker_names_it(self):
@@ -178,7 +178,7 @@ class BootCaptureStop(unittest.TestCase):
 
     def test_stops_after_a_selftest_failure_too(self):
         stop = checks.BootCaptureDone()
-        fired = [stop(t) for t in (BOOT, START, "[STAGE] selftest: fail step=1", LED128)]
+        fired = [stop(t) for t in (BOOT, START, "[STAGE] selftest: fail step=1", RB_128)]
         self.assertEqual(fired, [False, False, False, True])
 
 
