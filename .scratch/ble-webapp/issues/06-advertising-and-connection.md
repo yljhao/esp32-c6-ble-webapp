@@ -8,7 +8,7 @@ Spec: `.scratch/ble-webapp/spec.md` (Bluetooth, Serial markers). Glossary: Conne
 
 **Board:** required
 
-**Status:** ready-for-agent
+**Status:** done
 
 - [x] Boot prints `[BLE] advertising name=XIAO-C6-LED` after `[WDT] armed`.
 - [x] The Harness finds the board by name and NUS UUID, connects; the board prints `[BLE] connected` and `[BLE] mtu=<n>`; a second scan while connected does not see the board.
