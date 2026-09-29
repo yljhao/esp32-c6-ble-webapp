@@ -15,6 +15,7 @@ One line each, always current. This is the whole file for most sessions. A card 
 - Capture: `./build.sh serial [SECONDS] [--expect REGEX]` resets, captures with timestamps, exits 1 on a missing marker; `./build.sh console` skips the reset (see log: Capture command).
 - Test: `./build.sh test` = twister over `tests/` on `native_sim/native/64`, the esptool guard's red-path test and the Harness unittest (`tools/verify`); exit non-zero on any failure.
 - Verify: `./verify.sh [--flash]` runs the acceptance Harness (final `RESULT:` line, exit 0 only on PASS); its red path is proven (see log: Harness).
+- Overlay: a `boards/` overlay added after the first configure is not picked up by `-p auto`; `rm -rf build` once (see log: Ticket 03 Self-test).
 - Production state: not defined yet.
 - Quirks: `get-security-info` now resets the app itself; console bytes printed while the port is closed are lost; 32-bit `native_sim` does not link on this PC.
 
@@ -76,7 +77,7 @@ Dated, append-only. A card line points here for its reason.
 
 ### Configuration raised and why
 
-<none yet in this repo>
+- 2026-09-30 (ticket 03): raised from default in `prj.conf`: `CONFIG_PWM=y` and `CONFIG_GPIO=y` (User LED and pad readback), `CONFIG_LOG=y` with `CONFIG_LOG_PRINTK=n` (diagnostics through the log, Markers stay synchronous). No stack raised: `main` peaked at 536 of 2048 bytes (26 %) after the Self-test and 10 s of idle loop (scratch build with `CONFIG_THREAD_ANALYZER_AUTO`, interval minimum 5 s; not in the image).
 
 ### Production state to restore after a test
 
@@ -92,3 +93,11 @@ Dated, append-only. A card line points here for its reason.
 - 2026-09-30 (ticket 02, this project's image, MD5 5af085eb6016fbcb5958e29dd9ca6990): `./verify.sh <&-` (stdin closed) ran build, guard, identify (`chip_id=13`), reset + capture, `[BOOT] reason=usb at +2.062s`: `RESULT: PASS (4/4 checks)`, exit 0, 4 s. `./verify.sh --flash` added `build.sh flash` (`MD5 相符: 5af085eb...`) before the capture: `RESULT: PASS (5/5 checks)`, exit 0, 7 s. The capture log is kept at `build/verify/capture-<stamp>.log`.
 - 2026-09-30 red paths, all exit 1: `./verify.sh --seconds 1` (window ends before the 2 s boot delay, board run) gave `FAIL [BOOT] reason=<cause> present (no [BOOT] reason= marker in 26 captured line(s))` and `RESULT: FAIL (3/4 checks)`; `./verify.sh --replay <log without the [BOOT] line>` gave the same FAIL and `RESULT: FAIL (0/1 checks)`; the lock held by another `flock` gave `harness: board busy` and `RESULT: FAIL (0/0 checks)`; `PYTHONPATH=<dir with esptool.py>` made the build and the guard Check FAIL (`RESULT: FAIL (0/2 checks)`) before any board access.
 - 2026-09-30: `--replay LOG` runs only the capture Checks over a saved log (lines before a `stale line(s)` note are dropped, as the live capture drops them): no board, no lock, no build. A capture window shorter than the boot marker delay is the cheapest on-board red path.
+
+### Ticket 03 Self-test
+
+- 2026-09-30 boot timeline (this project's image, `./build.sh serial`, times from the reset): ROM lines at +0.2 s, `[BOOT] reason=usb` +2.06 s (the 2 s marker delay), `[STAGE] selftest: start` +2.06 s, readbacks `brightness=0 duty=0.0% freq=0` +2.06 s, `brightness=128 duty=50.1% freq=19998` +2.45 s, `brightness=255 duty=100.0% freq=0` +2.84 s, `[STAGE] selftest: done` +3.61 s, `[LED] brightness=128 duty=50.1..50.2% freq=19998` +3.62 s. The sweep takes about 1.55 s; the boot ends about 1.6 s after the first marker.
+- 2026-09-30: Duty readback of the User LED (active-low pad): Brightness 0 reads 0.0 % low, 255 reads 100.0 % low, both with no edges; 128 reads 50.1 to 50.2 % low. Readbacks are taken on the way up only (0, 128, 255); the way down has none. With the thread analyzer running the 128 frequency read 19988.
+- 2026-09-30 red path for the Self-test: scratch build (`C6_BUILD_DIR=<scratch> C6_EXTRA_DTC_OVERLAY=<overlay setting PWM_POLARITY_NORMAL on user_led_pwm> ./verify.sh --flash`) printed `[LED] brightness=0 duty=100.0% freq=0` then `[STAGE] selftest: fail step=1`, and the boot continued to `[LED] brightness=128 duty=49.9% freq=19998` at +2.08 s; the Harness gave `RESULT: FAIL (7/9 checks)`. The production image was then rebuilt, re-flashed and `./verify.sh` gave `RESULT: PASS (9/9 checks)`.
+- 2026-09-30: the reference project's overlay works unchanged here (LEDC channel 0 / timer 0 on GPIO15, 20 kHz, inverted); the `led0` alias of the Seeed board dts supplies the pad and its active-low flag. A `boards/xiao_esp32c6_esp32c6_hpcore.overlay` created after the first `west build` was ignored (the build failed on the missing `user_led_pwm` alias) until the build directory was removed.
+- 2026-09-30 (ticket 03): the capture now ends at the boot's `[LED] brightness=128` after the Self-test (was `[BOOT]`), and the Checks are Self-test done, Self-test readbacks at 0/128/255, boot `[LED] brightness=128` in tolerance (duty 49 to 51 % low, freq 19000 to 21000), marker order; the run is 9 checks, about 9 s with `--flash`.

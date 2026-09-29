@@ -12,4 +12,8 @@ target_include_directories(app PRIVATE src)
 target_sources(app PRIVATE
   src/main.c
   src/reset_reason.c
+  src/duty_readback.c
+  src/user_led.c
+  src/selftest.c
+  src/brightness.c
 )

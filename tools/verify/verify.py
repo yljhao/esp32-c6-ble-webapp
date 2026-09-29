@@ -6,7 +6,7 @@ one final `RESULT: PASS|FAIL (n/m checks)` line; exit 0 only on PASS.
     ./verify.sh                 build, guard, identify, reset + capture, Checks (checks the running image)
     ./verify.sh --flash         same, with `build.sh flash` (--chip esp32c6 pinned) before the capture
     ./verify.sh --replay LOG    run the capture Checks over a saved capture log; no board, no lock, no build
-    ./verify.sh --seconds N     capture window after the reset (default 20 s; [BOOT] ends the capture early)
+    ./verify.sh --seconds N     capture window after the reset (default 20 s; the boot's [LED] brightness=128 ends the capture early)
 
 The Harness holds the board lock (/tmp/<port>.lock) for the whole run and
 passes C6_BOARD_LOCK_HELD=1 to build.sh so its calls do not wait on it. The
@@ -14,7 +14,9 @@ capture log is kept at <build dir>/verify/capture-<stamp>.log.
 
 Checks so far (pure logic in checks.py, unit-tested by test_checks.py):
   build.sh build produces zephyr.bin; the esptool guard; chip_id 13 (identify);
-  [--flash] build.sh flash; `[BOOT] reason=<cause>` present in the capture.
+  [--flash] build.sh flash; `[BOOT] reason=<cause>` present in the capture; Self-test done
+  (and its readbacks at 0, 128, 255 in tolerance); `[LED] brightness=128` after it with duty
+  50 +- 1 % low and freq near 20 kHz; marker order [BOOT] -> selftest -> [LED].
 """
 import argparse
 import datetime
@@ -47,6 +49,10 @@ A_GUARD = "esptool guard: esptool-build launcher only, no importable esptool"
 A_IDENTIFY = "build.sh identify sees chip_id 13"
 A_FLASH = "build.sh flash writes the image via esptool-build --chip esp32c6"
 A_BOOT = "[BOOT] reason=<cause> present"
+A_SELFTEST = "[STAGE] selftest: done"
+A_SELFTEST_RB = "Self-test Duty readbacks at 0, 128, 255 in tolerance"
+A_BOOT_LED = "[LED] brightness=128 after the Self-test, duty 50 +- 1 % low, freq near 20 kHz"
+A_ORDER = "marker order: [BOOT] -> selftest -> [LED]"
 
 
 class Harness:
@@ -115,7 +121,7 @@ class Harness:
                 f.write(console.fmt(t, w, s) + "\n")
                 f.flush()
             self.lines = console.capture(self.args.port, self.args.seconds, do_reset=True,
-                                         stop_when=checks.is_boot_line, sink=sink)
+                                         stop_when=checks.BootCaptureDone(), sink=sink)
         print(f"captured {len(self.lines)} lines -> {self.log_path}", flush=True)
 
     def load_replay(self, path):
@@ -138,6 +144,10 @@ class Harness:
     def capture_checks(self):
         ok, detail = checks.check_boot_marker(self.lines)
         self.check(A_BOOT, ok, detail)
+        self.check(A_SELFTEST, *checks.check_selftest_done(self.lines))
+        self.check(A_SELFTEST_RB, *checks.check_selftest_readbacks(self.lines))
+        self.check(A_BOOT_LED, *checks.check_boot_brightness(self.lines))
+        self.check(A_ORDER, *checks.check_marker_order(self.lines))
 
     def finish(self):
         if self.log_path:

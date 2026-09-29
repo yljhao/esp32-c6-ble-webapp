@@ -1,0 +1,51 @@
+/*
+ * SPDX-License-Identifier: Apache-2.0
+ *
+ * User LED on GPIO15 driven by LEDC channel 0 / timer 0 at 20 kHz.
+ * The LED is wired active-low: the polarity is declared here, not in C.
+ * The pad keeps its input buffer enabled so the firmware can read the
+ * level it actually drives (Duty readback).
+ */
+
+#include <zephyr/dt-bindings/pwm/pwm.h>
+
+/ {
+	aliases {
+		user-led-pwm = &user_led_pwm;
+	};
+
+	pwmleds {
+		compatible = "pwm-leds";
+
+		user_led_pwm: user_led_pwm {
+			pwms = <&ledc0 0 PWM_HZ(20000) PWM_POLARITY_INVERTED>;
+			label = "User LED";
+		};
+	};
+};
+
+&pinctrl {
+	ledc0_default: ledc0_default {
+		group1 {
+			pinmux = <LEDC_CH0_GPIO15>;
+			/* Output is enabled by the LEDC signal itself. input-enable
+			 * keeps pinctrl from disabling the pad's input buffer; the
+			 * firmware turns it on through the GPIO driver (user_led.c).
+			 */
+			input-enable;
+		};
+	};
+};
+
+&ledc0 {
+	pinctrl-0 = <&ledc0_default>;
+	pinctrl-names = "default";
+	status = "okay";
+	#address-cells = <1>;
+	#size-cells = <0>;
+
+	channel0@0 {
+		reg = <0x0>;
+		timer = <0>;
+	};
+};
