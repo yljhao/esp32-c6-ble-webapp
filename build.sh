@@ -12,8 +12,10 @@
 #   ./build.sh console [SECONDS] [--send TEXT] [--expect REGEX ...]
 #                               same capture WITHOUT a reset; --send types a serial-shell command first
 #   ./build.sh guard            run the esptool guard alone (spec: No upstream esptool)
+#   ./build.sh test-tools       the Python unittest suites of tools/verify alone (Harness Check logic,
+#                               Central line logic); project .venv, no board, no Bluetooth, no serial
 #   ./build.sh test [ARGS...]   host unit suites: twister over tests/ on native_sim, no board, then the
-#                               esptool guard's own red-path test, then the Harness Check unit tests;
+#                               esptool guard's own red-path test, then test-tools;
 #                               exits non-zero on any failure.
 #                               Extra ARGS go to twister, e.g. --sub-test c6.smoke.smoke.test_arithmetic_holds
 #
@@ -148,7 +150,12 @@ cmd_test() {
     --outdir "$out" --clobber-output --inline-logs --no-detailed-test-id "$@"
   echo "build.sh: host suites passed (report: $out/twister.json)"
   "$ROOT/tools/test_esptool_guard.sh"
-  # Harness Check logic (Python unittest, project venv; no board)
+  cmd_test_tools
+}
+
+# Harness Check logic and Central line logic (Python unittest, project venv). Touches neither
+# the board nor the PC's Bluetooth adapter nor a serial port.
+cmd_test_tools() {
   "$(venv_python)" -m unittest discover -s "$ROOT/tools/verify" -v
 }
 
@@ -160,5 +167,6 @@ case "${1:-}" in
   serial)   shift; cmd_serial "$@" ;;
   console)  shift; cmd_console "$@" ;;
   test)     shift; cmd_test "$@" ;;
-  *)        sed -n '2,23p' "$0" | sed 's/^# \{0,1\}//'; exit 2 ;;
+  test-tools) cmd_test_tools ;;
+  *)        sed -n '2,25p' "$0" | sed 's/^# \{0,1\}//'; exit 2 ;;
 esac

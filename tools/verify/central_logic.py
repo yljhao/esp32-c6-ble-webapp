@@ -1,0 +1,181 @@
+"""Pure logic of the Harness acting as a Central (spec: Wire contract, Harness).
+
+No I/O: no bleak, no serial, no clock, no sleep. central.py (the bleak wrapper) feeds
+notification bytes and timestamps in; the Checks read the results out.
+"""
+import codecs
+import json
+import re
+from collections import namedtuple
+
+# Line classes (spec: Wire contract). A line beginning `{` is a Heartbeat, one beginning
+# `LED ` or `ERR ` is a reply; a line that claims a class but does not parse is OTHER.
+HEARTBEAT = "heartbeat"
+LED = "led"
+ERR = "err"
+OTHER = "other"
+
+SEQ_MAX = 2**32 - 1
+UPTIME_MAX = 2**64 - 1
+BRIGHTNESS_MAX = 255
+
+# `LED <n>`: decimal 0-255, no sign, no leading zeros, single space, nothing after.
+_LED_RE = re.compile(r"LED (0|[1-9][0-9]{0,2})\Z")
+_ERR_PREFIX = "ERR "
+
+BOARD_NAME = "XIAO-C6-LED"
+# Nordic UART Service (Nordic NUS specification): the Central writes RX, the board notifies on TX.
+NUS_SERVICE_UUID = "6e400001-b5a3-f393-e0a9-e50e24dcca9e"
+NUS_RX_UUID = "6e400002-b5a3-f393-e0a9-e50e24dcca9e"
+NUS_TX_UUID = "6e400003-b5a3-f393-e0a9-e50e24dcca9e"
+ATT_HEADER = 3      # a write or notification carries at most MTU - 3 bytes of data
+
+Heartbeat = namedtuple("Heartbeat", "seq uptime_ms")
+Reply = namedtuple("Reply", "ok brightness message")
+# One classified line. Fields that do not apply to the kind are None.
+Line = namedtuple("Line", "kind raw seq uptime_ms brightness message")
+
+
+class LineReassembler:
+    """Turns NUS notification chunks into complete lines.
+
+    A line ends with `\\n` and may span several notifications, or several lines may share one.
+    A trailing `\\r` is dropped. Bytes are buffered, so a multi-byte UTF-8 character split
+    between two notifications is decoded whole; invalid bytes become U+FFFD, never an error.
+    """
+
+    def __init__(self):
+        self._buf = b""
+
+    def feed(self, chunk):
+        """Add one notification's bytes; return the lines it completed, oldest first."""
+        self._buf += bytes(chunk)
+        *done, self._buf = self._buf.split(b"\n")
+        return [codecs.decode(raw, "utf-8", "replace").rstrip("\r") for raw in done]
+
+    @property
+    def pending(self):
+        """The unfinished line so far (what a Check reports when a capture ends mid-line)."""
+        return codecs.decode(self._buf, "utf-8", "replace")
+
+    def reset(self):
+        """Drop a partial line, e.g. at a new Connection."""
+        self._buf = b""
+
+
+def parse_reply(text):
+    """`LED <n>` -> Reply(True, n, None); `ERR <msg>` -> Reply(False, None, msg); else None."""
+    m = _LED_RE.match(text)
+    if m:
+        n = int(m.group(1))
+        return Reply(True, n, None) if n <= BRIGHTNESS_MAX else None
+    if text.startswith(_ERR_PREFIX):
+        return Reply(False, None, text[len(_ERR_PREFIX):])
+    return None
+
+
+def _is_uint(value, maximum):
+    # bool is an int in Python; JSON true is not a number here.
+    return isinstance(value, int) and not isinstance(value, bool) and 0 <= value <= maximum
+
+
+def parse_heartbeat(text):
+    """`{"seq":<u32>,"uptime_ms":<u64>}` -> Heartbeat(seq, uptime_ms), else None."""
+    try:
+        obj = json.loads(text)
+    except ValueError:
+        return None
+    if not isinstance(obj, dict):
+        return None
+    seq, uptime = obj.get("seq"), obj.get("uptime_ms")
+    if not (_is_uint(seq, SEQ_MAX) and _is_uint(uptime, UPTIME_MAX)):
+        return None
+    return Heartbeat(seq, uptime)
+
+
+def classify_line(text):
+    """One reassembled line -> Line(kind, raw, seq, uptime_ms, brightness, message)."""
+    if text.startswith("{"):
+        hb = parse_heartbeat(text)
+        if hb:
+            return Line(HEARTBEAT, text, hb.seq, hb.uptime_ms, None, None)
+    else:
+        reply = parse_reply(text)
+        if reply:
+            return Line(LED if reply.ok else ERR, text, None, None, reply.brightness, reply.message)
+    return Line(OTHER, text, None, None, None, None)
+
+
+# Heartbeat continuity (spec: Heartbeat rules). The board counts `seq` from boot once per
+# second whether or not a Central listens, so between two received Heartbeats:
+#   seq + 1 = CONSECUTIVE; larger = GAP (a disconnect, or lines lost); smaller, or uptime_ms going
+#   back, = REBOOT; same seq again = REPEAT.
+CONSECUTIVE = "consecutive"
+GAP = "gap"
+REBOOT = "reboot"
+REPEAT = "repeat"
+
+# Sample = a Heartbeat with the PC time (seconds, any monotonic origin) its line was completed.
+Sample = namedtuple("Sample", "t seq uptime_ms")
+
+HB_PERIOD_S = 1.0
+HB_TOLERANCE_S = 0.2
+_EDGE = 1e-6      # float slack so an interval of exactly period +- tolerance passes
+
+
+def step_kind(prev, cur):
+    """CONSECUTIVE / GAP / REBOOT / REPEAT for two Samples, oldest first."""
+    if cur.seq < prev.seq or cur.uptime_ms < prev.uptime_ms:
+        return REBOOT
+    if cur.seq == prev.seq:
+        return REPEAT
+    return CONSECUTIVE if cur.seq == prev.seq + 1 else GAP
+
+
+def check_heartbeats(samples, min_samples, period_s=HB_PERIOD_S, tol_s=HB_TOLERANCE_S):
+    """Steady-state Check: at least `min_samples` Heartbeats, every step CONSECUTIVE, every
+    interval between arrivals within period_s +- tol_s. Returns (ok, detail); the detail names
+    the first offender. Samples are Sample tuples or plain (t, seq, uptime_ms), oldest first."""
+    samples = [Sample(*s) for s in samples]
+    if len(samples) < min_samples:
+        return False, f"{len(samples)} heartbeat(s), need at least {min_samples}"
+    if not samples:
+        return True, "no heartbeats required"
+    intervals = []
+    for prev, cur in zip(samples, samples[1:]):
+        kind = step_kind(prev, cur)
+        if kind != CONSECUTIVE:
+            return False, f"{kind} at seq {prev.seq} -> {cur.seq} (uptime_ms {prev.uptime_ms} -> {cur.uptime_ms})"
+        dt = cur.t - prev.t
+        if abs(dt - period_s) > tol_s + _EDGE:
+            return False, (f"period {dt:.3f} s between seq {prev.seq} -> {cur.seq} "
+                           f"outside {period_s:g} +- {tol_s:g} s")
+        intervals.append(dt)
+    span = f"seq {samples[0].seq}..{samples[-1].seq}"
+    if intervals:
+        return True, (f"{len(samples)} heartbeats, {span} consecutive, "
+                      f"period {min(intervals):.3f}..{max(intervals):.3f} s")
+    return True, f"{len(samples)} heartbeat, {span}"
+
+
+def matches_board(local_name, service_uuids, name=BOARD_NAME, service_uuid=NUS_SERVICE_UUID):
+    """True when an advertisement carries the board's exact name AND the NUS service UUID."""
+    if local_name != name:
+        return False
+    return service_uuid.lower() in {u.lower() for u in (service_uuids or ())}
+
+
+def encode_command(text):
+    """A command as the bytes to write: exactly one trailing `\\n`, none inside."""
+    body = text[:-1] if text.endswith("\n") else text
+    if "\n" in body or "\r" in body:
+        raise ValueError("a command is one line")
+    return (body + "\n").encode("utf-8")
+
+
+def chunk_for_mtu(data, mtu):
+    """Split bytes into writes of at most mtu - 3 bytes (empty data -> no chunks)."""
+    size = mtu - ATT_HEADER
+    if size < 1:
+        raise ValueError(f"ATT MTU {mtu} leaves no room for data")
+    return [data[i:i + size] for i in range(0, len(data), size)]

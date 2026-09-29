@@ -13,7 +13,7 @@ One line each, always current. This is the whole file for most sessions. A card 
 - Flash: `west flash -d build` day to day, `./build.sh flash` (pins `--chip esp32c6`) for the Harness and acceptance; both verified here; never `--no-reset`, `--sysbuild`, MCUboot (ADR-0003).
 - Reset: `.venv/bin/python tools/board/reset.py` (RTS pulse through USB-Serial/JTAG, reads the ROM banner, port stays; see log: Reset method).
 - Capture: `./build.sh serial [SECONDS] [--expect REGEX]` resets, captures with timestamps, exits 1 on a missing marker; `./build.sh console` skips the reset (see log: Capture command).
-- Test: `./build.sh test` = twister over `tests/` on `native_sim/native/64`, the esptool guard's red-path test and the Harness unittest (`tools/verify`); exit non-zero on any failure.
+- Test: `./build.sh test` = twister on `native_sim/native/64`, the esptool guard test and `test-tools`; `./build.sh test-tools` = the `tools/verify` Python unittests alone (no board, BT or serial).
 - Verify: `./verify.sh [--flash]` runs the acceptance Harness (final `RESULT:` line, exit 0 only on PASS); `--soak [N]` idle run, `--bite` debug watchdog bite; red path proven (see log: Harness).
 - Overlay: a `boards/` overlay added after the first configure is not picked up by `-p auto`; `rm -rf build` once (see log: Ticket 03 Self-test).
 - Debug image: `debug.conf` (adds `debug hang`) builds only into `build-debug` through `./verify.sh --bite`, which restores production; never flash it by hand (see log: Ticket 04).
@@ -79,6 +79,13 @@ Dated, append-only. A card line points here for its reason.
 ### Configuration raised and why
 
 - 2026-09-30 (ticket 03): raised from default in `prj.conf`: `CONFIG_PWM=y` and `CONFIG_GPIO=y` (User LED and pad readback), `CONFIG_LOG=y` with `CONFIG_LOG_PRINTK=n` (diagnostics through the log, Markers stay synchronous). No stack raised: `main` peaked at 536 of 2048 bytes (26 %) after the Self-test and 10 s of idle loop (scratch build with `CONFIG_THREAD_ANALYZER_AUTO`, interval minimum 5 s; not in the image).
+
+### Ticket 05 Central logic
+
+- 2026-09-30 (ticket 05, `Board: none`, nothing touched the board or the PC's Bluetooth adapter): `bleak` 3.0.2 (with `dbus-fast` 5.0.22) installed into the project `.venv` only through `tools/requirements.txt` (`bleak>=0.22`); the Zephyr venv still has no `bleak`. Python 3.14.4 in the `.venv`.
+- Host test command for the Harness Central logic: `./build.sh test-tools` (= `.venv/bin/python -m unittest discover -s tools/verify -v`), also the last step of `./build.sh test`. 132 tests pass in about 0.03 s: `test_central_logic.py` (line reassembly across split notifications, line classification, reply and Heartbeat parsing, Heartbeat continuity and period, board match by name and NUS UUID, write chunking) beside the older `test_checks.py`. A test proves `central_logic` imports neither `bleak` nor `serial`; `central.py` (the bleak wrapper, glue) imports bleak only inside its functions, so no test can scan or connect.
+- 2026-09-30 red path: changing one expected line in `test_central_logic.py` (`["LED 128"]` to `["LED 129"]`) made `./build.sh test-tools` print `AssertionError: Lists differ` and `FAILED (failures=1)`, exit 1; restored, exit 0. Gotcha: editing a test file twice within one second with the same size leaves a stale `__pycache__/*.pyc` (same mtime and size), so the restored file still failed; `rm -rf tools/verify/__pycache__` fixed it.
+- `central.py` was smoke-run once against a hand-written fake `BleakClient` (throwaway script, not committed): a 45-byte command went out as 20 + 20 + 5 byte writes at MTU 23, split notifications reassembled into the `LED 128` reply, disconnect set the event. It has not touched real Bluetooth; the first real use is a later ticket with `Board: required`.
 
 ### Production state to restore after a test
 

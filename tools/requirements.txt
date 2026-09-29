@@ -1,2 +1,3 @@
-# Project .venv: host tools (board console tools now; bleak and playwright arrive with the Harness tickets)
+# Project .venv: host tools (board console tools, the Harness Central via bleak; playwright arrives with the Web App automation ticket)
 pyserial>=3.5
+bleak>=0.22
