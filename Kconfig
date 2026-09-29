@@ -1,0 +1,14 @@
+# SPDX-License-Identifier: Apache-2.0
+
+mainmenu "XIAO ESP32-C6 BLE Web App"
+
+config C6_BOOT_MARKER_DELAY_MS
+	int "Delay before the first Marker, ms"
+	default 2000
+	help
+	  The USB-Serial/JTAG console drops bytes while no host reads the port,
+	  and a host that resets the board needs a moment to (re)open it. The
+	  firmware waits this long before printing "[BOOT] reason=" so a capture
+	  started right after a reset or a flash sees the first Marker.
+
+source "Kconfig.zephyr"
