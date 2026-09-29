@@ -10,13 +10,13 @@ One line each, always current. This is the whole file for most sessions. A card 
 
 - Board: Seeed Studio XIAO ESP32-C6, Zephyr target `xiao_esp32c6/esp32c6/hpcore`, Zephyr 4.4.2 at `~/zephyrproject/zephyr`, SDK `~/zephyr-sdk-1.0.1`.
 - Port: `/dev/ttyACM0` (USB-Serial/JTAG `303a:1001`), 115200.
-- Flash: `west flash -d build` day to day; `./build.sh flash` (pins `--chip esp32c6`) for the Harness and acceptance; both run esptool-build; no MCUboot, no `--sysbuild`, no `--no-reset` (ADR-0003).
-- Reset: not yet in this repo; port `tools/board/reset.py` from `../esp32-c6-wifi-vpn-mqtt-exam-2` (see log: Reset method).
-- Capture: not yet in this repo; port `build.sh serial` + `tools/board/console.py` from the reference project (see log: Capture command).
-- Test: not yet in this repo; reference uses `./build.sh test` = twister on `native_sim/native/64`.
+- Flash: `west flash -d build` day to day, `./build.sh flash` (pins `--chip esp32c6`) for the Harness and acceptance; both verified here; never `--no-reset`, `--sysbuild`, MCUboot (ADR-0003).
+- Reset: `.venv/bin/python tools/board/reset.py` (RTS pulse through USB-Serial/JTAG, reads the ROM banner, port stays; see log: Reset method).
+- Capture: `./build.sh serial [SECONDS] [--expect REGEX]` resets, captures with timestamps, exits 1 on a missing marker; `./build.sh console` skips the reset (see log: Capture command).
+- Test: `./build.sh test` = twister over `tests/` on `native_sim/native/64` plus the esptool guard's red-path test; exit non-zero on any failure.
 - Verify: none yet.
 - Production state: not defined yet.
-- Quirks to know before touching the board: `get-security-info` ignores `--after` and leaves the chip in ROM download mode until an explicit reset; console bytes printed while the port is closed are lost; 32-bit `native_sim` does not link on this PC.
+- Quirks: `get-security-info` now resets the app itself; console bytes printed while the port is closed are lost; 32-bit `native_sim` does not link on this PC.
 
 ## Evidence log
 
@@ -35,6 +35,9 @@ Dated, append-only. A card line points here for its reason.
 
 ### Flash tool and chip pin
 
+- 2026-09-30 (verified with this project's image, 144400 bytes): plain `west flash -d build` auto-detected `esp32c6(chip_id=13)` and `/dev/ttyACM0`, wrote at 0x0 in about 2.7 s including the ninja check, MD5 matched `0226ce294543e56ac93fabf0a60bc376`, and the board booted into the image (`[BOOT] reason=usb`). `./build.sh flash` (`--chip esp32c6 --port /dev/ttyACM0`, dio 80m 4MB) wrote the same image, same MD5, same boot. Each `west flash` also prints `The module for runner "rtsflash" could not be imported (No module named 'usb')`: a Zephyr runner this board does not use, harmless.
+- 2026-09-30 (reported by the esptool-build session, NOT verified here): before this ticket the board ran esptool-build's tick test image (`tick N on xiao_esp32c6/esp32c6/hpcore`, flash 0xFF elsewhere). Its uncommitted working tree now also supports `erase-flash` (RDID capacity, whole-chip erase, MD5 read-back), so `west flash --erase` should work; ADR-0003 still says never `--erase` until a ticket verifies it.
+
 - esptool-build (`~/Desktop/Project/esptool-build`) only exposes `version`, `elf2image`, `write-flash`, `get-security-info`; its default chip is esp32c3, so it refuses a write without `--chip esp32c6` (this is why `west flash` is rejected on this board). `--baud` is ignored on USB-Serial/JTAG, `erase-flash` unsupported.
 - Flash offset `CONFIG_FLASH_LOAD_OFFSET=0x0` (simple boot), artifact `build/zephyr/zephyr.bin`, `write-flash --after hard-reset` resets after writing.
 - 2026-09-30 (esptool-build f22af07, reported by the esptool-build session; verified there on this XIAO with a scratch image, NOT yet with this project's image): with no `--chip`, `write-flash`/`get-security-info` detect the chip from `chip_id` (13 → esp32c6) and refuse an unknown or not-yet-verified chip; with no `--port`/`ESPTOOL_PORT`, it uses the port only when exactly one `303a:1001` is present, refuses zero or several. So plain `west flash -d build` works on the C6. The line above about refusing without `--chip` is superseded by this one.
@@ -46,11 +49,16 @@ Dated, append-only. A card line points here for its reason.
 
 ### Reset method
 
+- 2026-09-30 (verified in this repo, image = this project's, `udevadm monitor --kernel --udev --property` started before each action, `lsusb` device number 006 before and after): no udev or kernel event across `west flash -d build` (run twice), `./build.sh flash`, `tools/board/reset.py` and `esptool get-security-info`; `/dev/ttyACM0` never disappeared. This replaces the CONFLICT line below: on this PC the post-flash hard reset and the RTS reset do not re-enumerate USB.
+- 2026-09-30 (verified): `esptool --chip esp32c6 get-security-info` (esptool-build working tree, uncommitted at the time) restarted the running app by itself: the tick program's counter restarted at `tick 1` within ~1 s of the command, and after `./build.sh identify` `[BOOT] reason=usb` followed. So `identify` no longer needs `reset.py`; the two older lines below about `--after` being ignored are superseded.
+
 - Reference `tools/board/reset.py`: TIOCEXCL open, DTR/RTS (1,1)->(0,1)->(0,0), RTS high (EN low) 200 ms, release, read ROM banner. RTS reset does not re-enumerate USB (`/dev/ttyACM0` stays). `get-security-info` leaves the chip idle in ROM download mode, so `identify` must be followed by this reset.
-- 2026-09-30 (esptool-build f22af07): `get-security-info` ignores `--after` and only closes the port, unlike upstream esptool, which honours `--after hard-reset` there too. `write-flash --after hard-reset` (what `west flash` passes) boots straight into the app.
-- 2026-09-30 CONFLICT, unverified: the esptool-build session reports that USB-Serial/JTAG re-enumerates after the post-flash hard reset (`/dev/ttyACM0` briefly disappears), while the reference project saw no re-enumeration on an RTS reset of a running app (`udevadm monitor` silent, 2026-09-13). Both may hold (reset from ROM download mode vs. from the app). The first flashing ticket runs `udevadm monitor` across `west flash` and across `reset.py` and replaces this line with what it saw.
+- 2026-09-30 (esptool-build f22af07; SUPERSEDED by the verified entry above): `get-security-info` ignores `--after` and only closes the port, unlike upstream esptool, which honours `--after hard-reset` there too. `write-flash --after hard-reset` (what `west flash` passes) boots straight into the app.
+- 2026-09-30 (resolved): the earlier CONFLICT between esptool-build's report of a re-enumeration after the post-flash reset and the reference project's observation is settled by the first entry of this section: no re-enumeration on this PC in any case tested.
 
 ### Capture command
+
+- 2026-09-30 (this repo, this project's image): `./build.sh serial 15 --expect '\[BOOT\] reason='` reset the board and printed `[BOOT] reason=usb` about 2.07 s after the reset (the boot delay is `CONFIG_C6_BOOT_MARKER_DELAY_MS=2000`), then `console.py: OK: all expected markers seen`, exit 0; with `--expect NOPE_MARKER` the window closed with `console.py: FAIL: marker missing: NOPE_MARKER`, exit 1. Capturing without a reset ~11 s after a `west flash` showed nothing: the marker was printed while the port was closed and is lost; starting the capture right after the flash (same shell line) caught `[BOOT] reason=usb` 1.5 s later. Reset cause after a flash is `usb`, same as after `reset.py`.
 
 - Reference `./build.sh serial [SECONDS]` = `flock /tmp/_dev_ttyACM0.lock` + `console.py --port /dev/ttyACM0 --seconds N --reset`, lines stamped `HH:MM:SS.mmm +sss.ssss`; `./build.sh console [SECONDS] [--send TEXT]` captures without reset and can type a shell command. Captures sync on the ROM banner `ESP-ROM:`.
 - Every boot prints `SHA-256 comparison failed: ... Attempting to boot anyway...` from the ROM: expected with simple boot, harmless.

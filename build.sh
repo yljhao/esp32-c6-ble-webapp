@@ -107,19 +107,17 @@ cmd_flash() {
 }
 
 cmd_identify() {
-  local py out
-  py="$(venv_python)"
+  local out
   zephyr_env
   esptool_guard "$BUILD_DIR"
-  # get-security-info leaves the chip in the ROM bootloader; the shared reset
-  # helper brings the firmware back and waits for the port to re-enumerate.
+  # esptool-build (f22af07 and later) honours --after, default hard-reset, so
+  # the app restarts by itself after get-security-info; no reset.py needed.
   out="$(board_lock esptool --chip "$CHIP" --port "$PORT" get-security-info)" || die "get-security-info failed"
   echo "$out"
   local chip_id
   chip_id="$(echo "$out" | sed -nE 's/^ *chip_id: *([0-9]+).*/\1/p' | head -n1)"
   [[ "$chip_id" == "13" ]] || die "expected chip_id 13 (ESP32-C6), got '${chip_id:-none}'"
-  board_lock "$py" "$ROOT/tools/board/reset.py" --port "$PORT"
-  echo "build.sh: identify OK (chip_id 13), board reset and $PORT back"
+  echo "build.sh: identify OK (chip_id 13); esptool reset the board after reading"
 }
 
 cmd_serial() {
