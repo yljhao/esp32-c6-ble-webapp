@@ -202,6 +202,36 @@ def expect_err_reply(reply):
     return True, f"ERR {reply.message}"
 
 
+REFUSAL_MESSAGE = "command not allowed"   # the board's LINK_FILTER_REFUSAL is "ERR " + this
+
+
+def expect_refusal(reply):
+    """The reply to a command the Shell link must refuse (ticket 08): `ERR command not allowed`."""
+    if reply is None:
+        return False, "no reply line"
+    if reply.ok:
+        return False, f"LED {reply.brightness}, expected ERR {REFUSAL_MESSAGE}"
+    if reply.message != REFUSAL_MESSAGE:
+        return False, f"ERR {reply.message}, expected ERR {REFUSAL_MESSAGE}"
+    return True, f"ERR {reply.message}"
+
+
+def _replies_only(lines):
+    return [ln for ln in lines if ln.kind != HEARTBEAT]
+
+
+def expect_only_refusals(lines, count):
+    """After `count` refused commands: exactly `count` lines came back (Heartbeats aside) and every
+    one is the refusal, so no command produced shell text or a second reply."""
+    got = _replies_only(lines)
+    bad = [ln.raw for ln in got if not (ln.kind == ERR and ln.message == REFUSAL_MESSAGE)]
+    if bad:
+        return False, f"line(s) other than the refusal: {bad}"
+    if len(got) != count:
+        return False, f"{len(got)} line(s), expected {count}"
+    return True, f"{count} line(s), each ERR {REFUSAL_MESSAGE}"
+
+
 def check_clean_stream(raw, lines):
     """Nothing but reply and Heartbeat lines on the Shell link (spec: no echo, prompt or escape
     sequences). `raw` is every byte received, `lines` the Line tuples classified from it. Fails on

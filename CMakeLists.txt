@@ -20,6 +20,7 @@ target_sources(app PRIVATE
   src/ble.c
   src/led_command.c
   src/led_shell.c
+  src/link_filter.c
   src/nus_chunk.c
   src/shell_nus.c
 )

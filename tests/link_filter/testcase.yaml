@@ -1,0 +1,10 @@
+tests:
+  c6.link_filter:
+    tags:
+      - c6
+      - shell
+    platform_allow:
+      - native_sim
+      - native_sim/native/64
+    integration_platforms:
+      - native_sim/native/64

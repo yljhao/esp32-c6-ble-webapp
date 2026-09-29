@@ -489,6 +489,47 @@ class HangRefused(unittest.TestCase):
         self.assertFalse(ok)
 
 
+class NoReboot(unittest.TestCase):
+    """Ticket 08: `kernel reboot` over the Shell link must not reset the board."""
+
+    def test_quiet_window_passes(self):
+        ok, detail = checks.check_no_reboot(timed((0.5, "[HB] seq=10")), 5.0, observed_s=5.2)
+        self.assertTrue(ok, detail)
+
+    def test_a_boot_marker_fails(self):
+        ok, detail = checks.check_no_reboot(timed((3.0, "[BOOT] reason=software")), 5.0, observed_s=5.2)
+        self.assertFalse(ok)
+        self.assertIn("[BOOT]", detail)
+
+    def test_a_rom_banner_fails(self):
+        ok, detail = checks.check_no_reboot(timed((2.0, ROM)), 5.0, observed_s=5.2)
+        self.assertFalse(ok)
+        self.assertIn("reset", detail)
+
+    def test_window_too_short_fails(self):
+        ok, detail = checks.check_no_reboot([], 5.0, observed_s=2.0)
+        self.assertFalse(ok)
+        self.assertIn("need 5", detail)
+
+
+class BootReason(unittest.TestCase):
+    """Ticket 08: `kernel reboot` on the serial shell resets the board with reason software."""
+
+    def test_wanted_reason_passes(self):
+        ok, detail = checks.check_boot_reason(timed((2.0, ROM), (3.0, "[BOOT] reason=software")), "software")
+        self.assertTrue(ok, detail)
+
+    def test_another_reason_fails_and_names_it(self):
+        ok, detail = checks.check_boot_reason(timed((3.0, "[BOOT] reason=watchdog")), "software")
+        self.assertFalse(ok)
+        self.assertIn("watchdog", detail)
+
+    def test_no_boot_marker_fails(self):
+        ok, detail = checks.check_boot_reason(timed((3.0, "noise")), "software")
+        self.assertFalse(ok)
+        self.assertIn("no [BOOT]", detail)
+
+
 class Result(unittest.TestCase):
     def test_all_pass(self):
         line = checks.format_result([("a", True, ""), ("b", True, "")])

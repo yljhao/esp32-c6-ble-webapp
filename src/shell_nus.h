@@ -13,6 +13,11 @@
  * - Board to Central: the shell's output is collected and sent as NUS notifications of at most
  *   ATT MTU - 3 bytes (nus_chunk.c) at each end of line. Output while no Central has subscribed
  *   is dropped.
+ * - Command restriction (ticket 08): every queued line is judged by link_filter_line() on the
+ *   shell thread before the shell sees a byte. Only the allow-list (`led set` and `led get`,
+ *   ADR-0001) gets through, rebuilt from its words; anything else is answered with
+ *   "ERR command not allowed" and never reaches the shell, so this instance has no other
+ *   command, no shell error text and no help. The serial shell keeps every command.
  * - On this instance echo, prompt, colours and VT100 are off, so every line the Central reads is
  *   a command reply (or, later, a Heartbeat), with plain "\n" line ends.
  *

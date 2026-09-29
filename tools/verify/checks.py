@@ -375,6 +375,32 @@ def check_hang_refused(lines, window_s, observed_s=None):
     return True, f"hang command not accepted, no reset in {end:.1f}s"
 
 
+def check_no_reboot(lines, window_s, observed_s=None):
+    """Nothing reset the board while a command was refused: no `[BOOT]` marker and no ROM banner in
+    `lines`, and the capture covered `window_s` seconds (`observed_s`, measured by the caller: a
+    quiet board prints nothing, so the lines cannot tell how long the capture ran)."""
+    for t, _, text in lines:
+        if is_boot_line(text):
+            return False, f"'{text.strip()}' at +{t:.1f}s"
+        if text.startswith(ROM_BANNER):
+            return False, f"board reset (ROM banner) at +{t:.1f}s"
+    end = observed_s if observed_s is not None else (lines[-1][0] if lines else 0.0)
+    if end < window_s:
+        return False, f"observed {end:.1f}s, need {window_s:.0f}s"
+    return True, f"no [BOOT] marker and no reset in {end:.1f}s"
+
+
+def check_boot_reason(lines, reason):
+    """The first `[BOOT] reason=<cause>` in `lines` carries `reason`."""
+    for t, _, text in lines:
+        m = BOOT_RE.match(text)
+        if m:
+            if m.group(1) == reason:
+                return True, f"{text.strip()} at +{t:.3f}s"
+            return False, f"'{text.strip()}', expected reason={reason}"
+    return False, f"no [BOOT] reason= marker in {len(lines)} captured line(s)"
+
+
 def check_marker_order(lines):
     """[BOOT] reason= -> [STAGE] selftest: start -> selftest end -> [LED] brightness=128 -> [WDT] armed
     -> [BLE] advertising."""

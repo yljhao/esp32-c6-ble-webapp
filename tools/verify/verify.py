@@ -35,6 +35,12 @@ Checks so far (pure logic in checks.py, unit-tested by test_checks.py):
   `[LED]` with the Duty readback in tolerance; `led set 300`, `led set abc`, `led set` reply `ERR ` and apply
   nothing (`led get` unchanged); the received stream holds nothing but reply lines; after a disconnect and
   reconnect `led get` returns the value set before; then the same `led` commands typed on the serial shell.
+  Command restriction (ticket 08), on the same Shell link Connection: `kernel reboot` answers `ERR command not
+  allowed` and no [BOOT] follows within 5 s, `led get` still works on that Connection; other commands
+  (`kernel reboot cold`, `kernel version`, `help`, `device list`, a bare `led`, `led set -h`, an escape
+  sequence, and a second command smuggled behind a `\\r`) each answer one such ERR line and reset nothing
+  (ADR-0001: no kernel or device command on the link). Last of all, `kernel reboot` typed on the serial shell
+  resets the board (`[BOOT] reason=software`).
 """
 import argparse
 import asyncio
@@ -73,6 +79,8 @@ BLE_SCENARIO_S = 120.0       # bound on the whole Central scenario
 SHELL_MARKER_WAIT_S = 3.0    # an applied Brightness prints its [LED] marker within this
 SHELL_SETTLE_S = 0.3         # after a rejected command, wait this long for a marker that must not come
 SHELL_SERIAL_S = 10.0        # bound on typing the `led` commands on the serial shell
+REBOOT_WINDOW_S = 5.0        # a refused `kernel reboot` must show no [BOOT] in this window (ticket 08)
+SERIAL_REBOOT_S = 20.0       # `kernel reboot` on the serial shell: the [BOOT] marker follows within this
 BLE_LOG_TAIL_S = 1.0         # keep capturing this long after the last step
 LOCK_WAIT_S = 5.0
 # Bounds on the build.sh calls (the Harness never waits for ever while it holds the lock):
@@ -110,6 +118,12 @@ A_SHELL_LEFT = "Shell link: final disconnect leaves the board advertising"
 A_SERIAL_LED = "serial shell: `led set` / `led get` reply as on the Shell link"
 A_SERIAL_MARKERS = "serial shell: `led set 0`, `255`, `128` print [LED] with Duty readback in tolerance"
 A_SERIAL_ERR = "serial shell: only the three applied commands print [LED] (`led set 300|abc|<none>` apply nothing)"
+A_REFUSE_REBOOT = ("Shell link: `kernel reboot` is refused with `ERR command not allowed` and the board does not "
+                   "reset (no [BOOT] within 5 s)")
+A_REFUSE_ALIVE = "Shell link: after the refused `kernel reboot` the same Connection still answers `led get` with LED 128"
+A_REFUSE_OTHERS = "Shell link: every other command outside the allow-list, and each input trick, is refused, one ERR line each"
+A_REFUSE_QUIET = "Shell link: none of the refused input reset the board or printed anything but the refusal"
+A_SERIAL_REBOOT = "serial shell: `kernel reboot` resets the board, next boot [BOOT] reason=software"
 A_NOHANG = "production build carries no hang command"
 A_SOAK = "idle: no reset (no spurious watchdog bite)"
 A_BITE = "debug image: hang command leads to a reset within ~5 s, next boot reason=watchdog"
@@ -427,6 +441,7 @@ class Harness:
                 self.check("console capture (Shell link scenario)", False, str(e))
         print(f"captured {len(cap.lines)} lines -> {self.log_path}", flush=True)
         self.run_serial_led()
+        self.run_serial_reboot()
 
     @staticmethod
     async def ask(conn, command):
@@ -498,6 +513,8 @@ class Harness:
             ok_clean, d_clean = cl.check_clean_stream(bytes(conn.raw), conn.lines)
             self.check(A_SHELL_CLEAN + " (second Connection)", ok_clean, d_clean)
 
+            await self.refusal_checks(conn, cap)
+
             mark = cap.mark()
             await conn.close()
             ok, detail = await cap.wait_check(mark, lambda ls: checks.check_ble_disconnected(ls, BLE_REMOTE_TERMINATED),
@@ -509,6 +526,69 @@ class Harness:
                     await conn.close()
                 except Exception as e:
                     print(f"harness: closing the Connection failed: {type(e).__name__}: {e}", flush=True)
+
+    # Input the Shell link must refuse; each one answers exactly one refusal line. The last four try
+    # to get past the filter: extra spaces, a second command behind "\r" (the shell reads "\r" as
+    # Enter), an escape sequence, a tab.
+    REFUSED_INPUT = (b"kernel reboot cold\n", b"kernel version\n", b"kernel uptime\n", b"help\n", b"device list\n",
+                     b"kernel threads\n", b"debug hang\n",
+                     b"led\n", b"led set -h\n", b"  kernel   reboot  \n", b"led get\rkernel reboot\n",
+                     b"led get\x1b[A\n", b"led\tget\n")
+
+    async def refusal_checks(self, conn, cap):
+        """Ticket 08: the Shell link offers only `led set` / `led get` (ADR-0001: no kernel or device command)."""
+        import central_logic as cl
+
+        # `kernel reboot`: refused, and the board does not reset within the window.
+        mark = cap.mark()
+        t0 = time.monotonic()
+        reply = await self.ask(conn, "kernel reboot")
+        ok_reply, d_reply = cl.expect_refusal(reply)
+        # the window plus half a second, so a reset at the very end of it still prints its banner
+        await asyncio.sleep(max(0.0, REBOOT_WINDOW_S + 0.5 - (time.monotonic() - t0)))
+        ok_boot, d_boot = checks.check_no_reboot(cap.since(mark), REBOOT_WINDOW_S,
+                                                 observed_s=time.monotonic() - t0)
+        self.check(A_REFUSE_REBOOT, ok_reply and ok_boot, f"{d_reply}; {d_boot}")
+        ok, detail = cl.expect_led_reply(await self.ask(conn, "led get") if conn.connected else None, 128)
+        self.check(A_REFUSE_ALIVE, ok and conn.connected, detail)
+        if not conn.connected:
+            return
+
+        # Everything else outside the allow-list, and the tricks.
+        mark = cap.mark()
+        t1 = time.monotonic()
+        first = len(conn.lines)
+        failed = []
+        for data in self.REFUSED_INPUT:
+            ok, detail = cl.expect_refusal(await self.ask_bytes(conn, data))
+            if not ok:
+                failed.append(f"{data!r}: {detail}")
+        self.check(A_REFUSE_OTHERS, not failed,
+                   "; ".join(failed) if failed else f"{len(self.REFUSED_INPUT)} inputs, each ERR command not allowed")
+        await asyncio.sleep(SHELL_SETTLE_S)
+        ok_lines, d_lines = cl.expect_only_refusals(conn.lines[first:], len(self.REFUSED_INPUT))
+        ok_boot, d_boot = checks.check_no_reboot(cap.since(mark), 0.0, observed_s=time.monotonic() - t1)
+        ok_led, d_led = cl.expect_led_reply(await self.ask(conn, "led get"), 128)
+        self.check(A_REFUSE_QUIET, ok_lines and ok_boot and ok_led and conn.connected,
+                   f"{d_lines}; {d_boot}; led get: {d_led}")
+
+    @staticmethod
+    async def ask_bytes(conn, data):
+        try:
+            return await conn.request_bytes(data)
+        except asyncio.TimeoutError:
+            return None
+
+    def run_serial_reboot(self):
+        """`kernel reboot` typed on the serial shell (which keeps every command) resets the board. Last
+        step of the run: the board restarts and advertises again."""
+        try:
+            lines = self.capture_to_log(SERIAL_REBOOT_S, False, stop_when=checks.is_boot_line,
+                                        send=b"kernel reboot\r\n", tag="serial-reboot")
+        except (OSError, TimeoutError) as e:
+            self.check("console capture (serial shell reboot)", False, str(e))
+            return
+        self.check(A_SERIAL_REBOOT, *checks.check_boot_reason(lines, "software"))
 
     def run_serial_led(self):
         """The same commands typed on the serial shell (the console keeps every command)."""

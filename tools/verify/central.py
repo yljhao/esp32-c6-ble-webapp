@@ -121,21 +121,30 @@ class CentralConnection:
             else:
                 self.other_lines.append((now, text))
 
-    async def send(self, command):
-        """Write one command line (chunks of the negotiated payload, write without response)."""
+    async def send_bytes(self, data):
+        """Write raw bytes as they are (chunks of the negotiated payload, write without response).
+        For the refusal Checks, which must send what `send` refuses to encode (a "\\r" inside a line)."""
         payload = self.write_payload
-        for chunk in cl.chunk_for_mtu(cl.encode_command(command), payload + cl.ATT_HEADER):
+        for chunk in cl.chunk_for_mtu(bytes(data), payload + cl.ATT_HEADER):
             await asyncio.wait_for(self._gatt.write_gatt_char(cl.NUS_RX_UUID, chunk, response=False),
                                    DEFAULT_IO_S)
+
+    async def send(self, command):
+        """Write one command line."""
+        await self.send_bytes(cl.encode_command(command))
+
+    async def request_bytes(self, data, timeout=DEFAULT_REPLY_S):
+        """Like `request`, for raw bytes."""
+        while not self._replies.empty():
+            self._replies.get_nowait()
+        await self.send_bytes(data)
+        return await asyncio.wait_for(self._replies.get(), timeout)
 
     async def request(self, command, timeout=DEFAULT_REPLY_S):
         """Send a command and return its Reply; Heartbeats arriving meanwhile are kept.
         The next reply line answers it (the shell answers in order); a stale one from before is
         dropped. Raises asyncio.TimeoutError when no reply line comes."""
-        while not self._replies.empty():
-            self._replies.get_nowait()
-        await self.send(command)
-        return await asyncio.wait_for(self._replies.get(), timeout)
+        return await self.request_bytes(cl.encode_command(command), timeout)
 
     async def wait_heartbeats(self, seconds):
         """Listen for `seconds`, or until the link drops. Returns the Heartbeats so far."""

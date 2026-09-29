@@ -12,9 +12,11 @@
 #include "led_command.h"
 
 /* Optional arguments the shell accepts (CONFIG_SHELL_ARGC_MAX is 20): more than the commands take,
- * so that led_command_*() answers "ERR too many arguments" for an ordinary excess. Input the
- * shell itself rejects (a bare `led`, `led set -h`, an unknown command) prints shell text, not
- * an ERR line; ticket 08 decides what the Shell link shows for those.
+ * so that led_command_*() answers "ERR too many arguments" for an ordinary excess. On the Shell
+ * link link_filter.c stops a command at LINK_FILTER_MAX_WORDS words first, so this limit only
+ * matters on the serial shell. Input the shell itself rejects (a bare `led`, `led set -h`, an
+ * unknown command) prints shell text on the serial shell; on the Shell link link_filter.c
+ * refuses those first with an ERR line.
  */
 #define LED_ARGS_MAX 15
 

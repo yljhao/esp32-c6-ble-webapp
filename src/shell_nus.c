@@ -2,6 +2,7 @@
 
 #include "shell_nus.h"
 
+#include "link_filter.h"
 #include "nus_chunk.h"
 
 #include <zephyr/bluetooth/bluetooth.h>
@@ -210,15 +211,11 @@ static int transport_enable(const struct shell_transport *t, bool blocking_tx)
 	return 0;
 }
 
-static int transport_write(const struct shell_transport *t, const void *data, size_t length,
-			   size_t *cnt)
+/* Collect `length` bytes for the Central and send them at each end of line. */
+static void tx_put(const uint8_t *in, size_t length)
 {
-	const uint8_t *in = data;
 	size_t left = length;
 
-	ARG_UNUSED(t);
-
-	/* Everything is accepted at once (sent or dropped), so the shell never waits for TX done. */
 	k_mutex_lock(&tx_lock, K_FOREVER);
 	while (left > 0) {
 		size_t n = MIN(left, sizeof(tx_buf) - tx_len);
@@ -235,16 +232,91 @@ static int transport_write(const struct shell_transport *t, const void *data, si
 		tx_flush();
 	}
 	k_mutex_unlock(&tx_lock);
+}
 
+static int transport_write(const struct shell_transport *t, const void *data, size_t length,
+			   size_t *cnt)
+{
+	ARG_UNUSED(t);
+
+	/* Everything is accepted at once (sent or dropped), so the shell never waits for TX done. */
+	tx_put(data, length);
 	*cnt = length;
 	return 0;
 }
 
+/* Command restriction (ticket 08): the shell reads only what link_filter_line() rebuilt from an
+ * allowed line. Runs on the shell thread, which may print to the link (the refusal).
+ */
+static uint8_t out_line[RX_LINE_MAX + 1];
+static size_t out_len;
+static size_t out_pos;
+
+/* Take the next complete line from the queue and judge it; true when out_line holds a line to
+ * run. Refused lines are answered here and skipped; empty lines are skipped silently.
+ */
+static bool next_allowed_line(void)
+{
+	static const char refusal[] = LINK_FILTER_REFUSAL "\n";
+	static uint8_t raw[RX_LINE_MAX]; /* shell thread only */
+	static uint32_t refused;
+
+	while (!ring_buf_is_empty(&rx_ring)) {
+		size_t n = 0;
+		size_t len = 0;
+		uint8_t b = 0;
+
+		/* only whole lines are queued, so the "\n" is in the ring */
+		while (n < sizeof(raw) && ring_buf_get(&rx_ring, &b, 1) == 1) {
+			raw[n++] = b;
+			if (b == '\n') {
+				break;
+			}
+		}
+
+		/* out_line and the length are only trusted on PASS (see link_filter.h) */
+		switch (link_filter_line(raw, n, (char *)out_line, sizeof(out_line), &len)) {
+		case LINK_FILTER_PASS:
+			out_len = len;
+			out_pos = 0;
+			return true;
+		case LINK_FILTER_REFUSE:
+			tx_put((const uint8_t *)refusal, sizeof(refusal) - 1);
+			/* a Central can refuse itself at radio speed: log the 1st, 2nd, 4th, 8th ... */
+			if ((++refused & (refused - 1)) == 0) {
+				LOG_INF("commands refused on the Shell link: %u so far", refused);
+			}
+			break;
+		case LINK_FILTER_IGNORE:
+		default:
+			break;
+		}
+	}
+	return false;
+}
+
 static int transport_read(const struct shell_transport *t, void *data, size_t length, size_t *cnt)
 {
+	uint8_t *dst = data;
+	size_t got = 0;
+
 	ARG_UNUSED(t);
 
-	*cnt = ring_buf_get(&rx_ring, data, length);
+	while (got < length) {
+		if (out_pos >= out_len) {
+			out_pos = 0;
+			out_len = 0;
+			if (!next_allowed_line()) {
+				break;
+			}
+		}
+		size_t n = MIN(length - got, out_len - out_pos);
+
+		memcpy(&dst[got], &out_line[out_pos], n);
+		out_pos += n;
+		got += n;
+	}
+	*cnt = got;
 	return 0;
 }
 

@@ -373,6 +373,49 @@ class ExpectedReplies(unittest.TestCase):
         self.assertFalse(ok)
 
 
+class RefusedCommands(unittest.TestCase):
+    """Ticket 08: what a Check accepts as the Shell link's answer to a command it must refuse.
+    The literal line is the one in the board's link_filter.h (LINK_FILTER_REFUSAL)."""
+
+    @staticmethod
+    def lines(*texts):
+        return [cl.classify_line(t) for t in texts]
+
+    def test_the_refusal_reply_passes(self):
+        ok, detail = cl.expect_refusal(cl.parse_reply("ERR command not allowed"))
+        self.assertTrue(ok, detail)
+
+    def test_another_err_line_is_not_the_refusal(self):
+        ok, detail = cl.expect_refusal(cl.parse_reply("ERR out of range 0-255"))
+        self.assertFalse(ok)
+        self.assertIn("out of range", detail)
+
+    def test_a_led_reply_is_not_a_refusal(self):
+        ok, _ = cl.expect_refusal(cl.parse_reply("LED 128"))
+        self.assertFalse(ok)
+
+    def test_no_reply_is_not_a_refusal(self):
+        ok, detail = cl.expect_refusal(None)
+        self.assertFalse(ok)
+        self.assertIn("no reply", detail)
+
+    def test_exactly_n_refusal_lines_pass_and_heartbeats_are_ignored(self):
+        ls = self.lines("ERR command not allowed", '{"seq":3,"uptime_ms":3000}', "ERR command not allowed")
+        ok, detail = cl.expect_only_refusals(ls, 2)
+        self.assertTrue(ok, detail)
+
+    def test_an_extra_line_fails(self):
+        ls = self.lines("ERR command not allowed", "ERR command not allowed", "LED 128")
+        ok, detail = cl.expect_only_refusals(ls, 2)
+        self.assertFalse(ok)
+        self.assertIn("LED 128", detail)
+
+    def test_too_few_lines_fail(self):
+        ok, detail = cl.expect_only_refusals(self.lines("ERR command not allowed"), 2)
+        self.assertFalse(ok)
+        self.assertIn("1 line", detail)
+
+
 class CleanStream(unittest.TestCase):
     """Ticket 07: nothing but reply lines (and Heartbeats) on the Shell link."""
 
