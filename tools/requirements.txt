@@ -1,3 +1,4 @@
-# Project .venv: host tools (board console tools, the Harness Central via bleak; playwright arrives with the Web App automation ticket)
+# Project .venv: host tools (board console tools, the Harness Central via bleak; playwright drives the installed Chrome (channel="chrome"), never a downloaded browser)
 pyserial>=3.5
 bleak>=0.22
+playwright>=1.49

@@ -83,7 +83,7 @@ def parse_heartbeat(text):
     """`{"seq":<u32>,"uptime_ms":<u64>}` -> Heartbeat(seq, uptime_ms), else None."""
     try:
         obj = json.loads(text)
-    except ValueError:
+    except (ValueError, RecursionError):      # RecursionError: a line of a hundred thousand brackets
         return None
     if not isinstance(obj, dict):
         return None

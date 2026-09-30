@@ -14,8 +14,10 @@
 #   ./build.sh guard            run the esptool guard alone (spec: No upstream esptool)
 #   ./build.sh test-tools       the Python unittest suites of tools/verify alone (Harness Check logic,
 #                               Central line logic); project .venv, no board, no Bluetooth, no serial
+#   ./build.sh test-web         the Web App logic tests (webapp/logic.js) in headless Google Chrome through
+#                               Playwright (channel="chrome", no Web Bluetooth, no board); project .venv
 #   ./build.sh test [ARGS...]   host unit suites: twister over tests/ on native_sim, no board, then the
-#                               esptool guard's own red-path test, then test-tools;
+#                               esptool guard's own red-path test, test-tools and test-web;
 #                               exits non-zero on any failure.
 #                               Extra ARGS go to twister, e.g. --sub-test c6.smoke.smoke.test_arithmetic_holds
 #
@@ -151,12 +153,23 @@ cmd_test() {
   echo "build.sh: host suites passed (report: $out/twister.json)"
   "$ROOT/tools/test_esptool_guard.sh"
   cmd_test_tools
+  cmd_test_web
 }
 
 # Harness Check logic and Central line logic (Python unittest, project venv). Touches neither
 # the board nor the PC's Bluetooth adapter nor a serial port.
 cmd_test_tools() {
   "$(venv_python)" -m unittest discover -s "$ROOT/tools/verify" -v
+}
+
+# Web App logic module in headless Chrome (spec: Testing Decisions; this PC has no Node.js).
+# tools/webtest/run.py serves the repo root on 127.0.0.1 and exits non-zero on any failed
+# assertion or page error. No Web Bluetooth, no board, no serial port, no Bluetooth adapter.
+cmd_test_web() {
+  local py
+  py="$(venv_python)"
+  "$py" -m unittest discover -s "$ROOT/tools/webtest" -v
+  "$py" "$ROOT/tools/webtest/run.py"
 }
 
 case "${1:-}" in
@@ -168,5 +181,6 @@ case "${1:-}" in
   console)  shift; cmd_console "$@" ;;
   test)     shift; cmd_test "$@" ;;
   test-tools) cmd_test_tools ;;
-  *)        sed -n '2,25p' "$0" | sed 's/^# \{0,1\}//'; exit 2 ;;
+  test-web) cmd_test_web ;;
+  *)        sed -n '2,27p' "$0" | sed 's/^# \{0,1\}//'; exit 2 ;;
 esac
