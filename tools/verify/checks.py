@@ -30,6 +30,10 @@ BITE_MIN_S = 2.0
 # The User LED is active-low, so the pad is low for the time the LED is on:
 # Brightness 0 reads 0.0 % low, 255 reads 100.0 % low, both with no edges.
 MID_DUTY_LOW, MID_DUTY_HIGH = 49.0, 51.0      # Brightness 128: 50 +- 1 % low
+# Ticket 12: the Brightness the Web App scenario sets before its plain disconnect, a level other than the boot 128.
+# Spec rule round(pct * 255 / 100): slider 25 % -> 64. Read by board_web.py (the slider step) and verify.py.
+WEB_KEPT_PCT, WEB_KEPT_BRIGHTNESS = 25, 64
+QUARTER_DUTY_LOW, QUARTER_DUTY_HIGH = 24.1, 26.1   # Brightness 64: 64 * 100 / 255 = 25.1 % low, +- 1 %
 CONST_DUTY_TOL = 1.0                          # 0 and 255: constant level, +- 1 %
 PWM_FREQ_LOW, PWM_FREQ_HIGH = 19000, 21000    # "near 20 kHz": +- 5 %
 
@@ -79,6 +83,8 @@ def _led_ok(brightness, duty, freq):
         return abs(duty - 100.0) <= CONST_DUTY_TOL and freq == 0
     if brightness == 128:
         return MID_DUTY_LOW <= duty <= MID_DUTY_HIGH and PWM_FREQ_LOW <= freq <= PWM_FREQ_HIGH
+    if brightness == WEB_KEPT_BRIGHTNESS:
+        return QUARTER_DUTY_LOW <= duty <= QUARTER_DUTY_HIGH and PWM_FREQ_LOW <= freq <= PWM_FREQ_HIGH
     return False
 
 
@@ -138,9 +144,9 @@ def _boot_led(lines):
 
 def check_led_applied(lines, brightness):
     """A Brightness applied over a link shows on the console as `[LED] brightness=<n> duty=..`
-    in tolerance (0 and 255 constant, 128 at 50 +- 1 % low). Only those three levels have a
-    tolerance defined; any other is refused rather than passed unchecked."""
-    if brightness not in (0, 128, 255):
+    in tolerance (0 and 255 constant, 128 at 50 +- 1 % low, 64 at 25 +- 1 % low). Only those four levels
+    have a tolerance defined; any other is refused rather than passed unchecked."""
+    if brightness not in (0, WEB_KEPT_BRIGHTNESS, 128, 255):
         return False, f"no tolerance defined for brightness={brightness}"
     for t, _, text in lines:
         led = parse_led(text)
@@ -647,3 +653,76 @@ def board_spacing_error(hb, tol_ms=WEB_UPTIME_TOL_MS):
         if abs((ub - ua) - 1000 * (b - a)) > tol_ms:
             return f"seq {a}->{b} uptime {ta}->{tb}"
     return None
+
+
+# -- Web App disconnect and reconnect (ticket 12) ---------------------------------------------------
+WEB_DISCONNECT_SHOWN_S = 5.0     # spec: after a board reboot the page shows disconnected within 5 s
+WEB_RESUME_MAX_SEQ = 15          # "a small seq" after a reboot: the counter starts ~3.7 s after the reset (ticket 09)
+                                 # and the page needs the reconnect on top; a counter that kept running is far higher
+
+
+def seq_shown_at(hb_log, ms):
+    """The Heartbeat seq the page displayed at wall-clock `ms`: the last change of its display at or before
+    that time (`hb_log` is [(wall_ms, seq, uptime), ...], oldest first), else None."""
+    shown = None
+    for t, seq, _ in hb_log:
+        if t <= ms:
+            shown = seq
+    return shown
+
+
+def check_disconnect_shown(status_log, since_ms, hb_log, seq_shown, limit_s=WEB_DISCONNECT_SHOWN_S):
+    """The page's status text became `disconnected` within `limit_s` seconds after `since_ms` (the moment the
+    reboot command was typed, or the Disconnect click), and the Heartbeat seq still on screen afterwards
+    (`seq_shown`, read from the page) is the one it displayed when it said disconnected, not cleared.
+    `status_log` is the page's status log [(wall_ms, text), ...], `hb_log` its Heartbeat display log."""
+    for ms, text in status_log:
+        if ms >= since_ms and text == "disconnected":
+            delay = (ms - since_ms) / 1000
+            last = seq_shown_at(hb_log, ms)
+            if last is None:
+                return False, f"no Heartbeat was on screen when the page said disconnected, so there is nothing to keep"
+            if delay > limit_s:
+                return False, f"the page said disconnected {delay:.1f} s after the trigger, limit {limit_s:g} s"
+            if seq_shown != str(last):
+                return False, (f"disconnected after {delay:.1f} s, but the seq on screen is {seq_shown!r}, "
+                               f"not the last one, {last}")
+            return True, (f"disconnected {delay:.1f} s after the trigger (limit {limit_s:g} s), "
+                          f"last Heartbeat seq {last} kept on screen")
+    return False, f"the page never said disconnected after the trigger (status log {[t for _, t in status_log]})"
+
+
+def check_reconnect_no_chooser(prompts_before, prompts_after, requests_before, requests_after, state_after):
+    """Reconnecting went through the device the page already holds: the chooser was not prompted again
+    (CDP DeviceAccess prompt events) and `navigator.bluetooth.requestDevice` was not called, and the page
+    is connected."""
+    if prompts_after != prompts_before:
+        return False, f"{prompts_after - prompts_before} new chooser prompt(s) during the reconnect"
+    if requests_after != requests_before:
+        return False, f"requestDevice was called {requests_after - requests_before} time(s) during the reconnect"
+    if state_after != "connected":
+        return False, f"no chooser prompt, but the page state is {state_after!r}, not connected"
+    return True, (f"no chooser prompt (events stay at {prompts_after}), requestDevice calls stay at "
+                  f"{requests_after}, page connected")
+
+
+def check_resumed_after_reboot(seq_before, first_seq, max_seq=WEB_RESUME_MAX_SEQ):
+    """After a reboot the first Heartbeat the page shows is small (<= `max_seq`) and below the last one
+    shown before the reboot (the counter restarted; it did not just keep running)."""
+    if first_seq is None:
+        return False, "the page showed no Heartbeat after the reconnect"
+    if first_seq >= seq_before:
+        return False, f"first seq after the reboot {first_seq} is not below the last one before it, {seq_before}"
+    if first_seq > max_seq:
+        return False, f"first seq after the reboot {first_seq} is not small (limit {max_seq}), before it {seq_before}"
+    return True, f"first seq after the reboot {first_seq} (limit {max_seq}), last one before it {seq_before}"
+
+
+def check_brightness_kept(slider_pct, board_text, lines, set_brightness):
+    """A disconnect and reconnect without a reboot keeps the Brightness set before it: the console `lines`
+    from the set on show no reset and end at `set_brightness`, and the re-synced slider and the page's own
+    "board reports" text show that value."""
+    for t, _, text in lines:
+        if text.startswith(ROM_BANNER) or is_boot_line(text):
+            return False, f"the board reset at +{t:.1f}s ({text.strip()}), the Brightness was not kept by a plain disconnect"
+    return check_slider_shows_board(slider_pct, board_text, lines, expect_brightness=set_brightness)

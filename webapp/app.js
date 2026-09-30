@@ -14,9 +14,9 @@ const GET_REPLY_WAIT_MS = 3000;   // enable the slider anyway when the board doe
 
 const $ = (id) => document.getElementById(id);
 const el = {
-  status: $('status'), connect: $('connect'), disconnect: $('disconnect'), slider: $('slider'),
-  sliderValue: $('slider-value'), board: $('board-brightness'), hbSeq: $('hb-seq'),
-  hbUptime: $('hb-uptime'), message: $('message'),
+  status: $('status'), connect: $('connect'), reconnect: $('reconnect'), disconnect: $('disconnect'),
+  slider: $('slider'), sliderValue: $('slider-value'), board: $('board-brightness'), hbSeq: $('hb-seq'),
+  hbUptime: $('hb-uptime'), hbNote: $('hb-note'), message: $('message'),
 };
 
 const reassembler = new LineReassembler();
@@ -30,8 +30,12 @@ let getTimer = null;
 function setState(state, text) {
   el.status.dataset.state = state;
   el.status.textContent = text;
-  el.connect.hidden = state === 'connected';
+  // Connect (the chooser) only until a board has been chosen; from then on Reconnect reuses that device.
+  const chosen = device !== null;
+  el.connect.hidden = chosen;
   el.connect.disabled = state === 'connecting';
+  el.reconnect.hidden = !chosen || state === 'connected';
+  el.reconnect.disabled = state === 'connecting';
   el.disconnect.hidden = state !== 'connected';
 }
 
@@ -77,6 +81,7 @@ function onLine(text) {
   if (line.kind === HEARTBEAT) {
     el.hbSeq.textContent = String(line.seq);
     el.hbUptime.textContent = formatUptime(line.uptimeMs);
+    el.hbNote.textContent = '';
     return;
   }
   if (line.kind !== LED && line.kind !== ERR) return;     // noise: nothing to show
@@ -110,7 +115,15 @@ function onDisconnected() {
   generation++;
   clearTimeout(getTimer);
   el.slider.disabled = true;
+  // The Brightness is unknown until `led get` answers on the next Connection: show that, so a slider that
+  // reads a value again has been re-synced from the board (and the automated run can tell).
+  el.slider.value = '0';
+  el.sliderValue.textContent = '-';
+  el.board.textContent = '-';
   setState('disconnected', 'disconnected');
+  // The last Heartbeat stays where it is; only a note says it is not live any more.
+  if (/^[0-9]+$/.test(el.hbSeq.textContent)) el.hbNote.textContent = ' (last received, the Connection is down)';
+  showMessage('Press Reconnect to connect to the same board again.');
 }
 
 async function openConnection() {
@@ -135,27 +148,40 @@ async function openConnection() {
   await requestGet();
 }
 
+function failed(e) {
+  setState('error', 'connection failed');
+  showMessage(`${e.name}: ${e.message}`);
+}
+
 async function onConnectClick() {
   try {
-    if (!device) {
-      device = await navigator.bluetooth.requestDevice({
-        filters: [{ namePrefix: NAME_PREFIX }],
-        optionalServices: [NUS_SERVICE],
-      });
-      device.addEventListener('gattserverdisconnected', onDisconnected);
-    }
+    device = await navigator.bluetooth.requestDevice({
+      filters: [{ namePrefix: NAME_PREFIX }],
+      optionalServices: [NUS_SERVICE],
+    });
+    device.addEventListener('gattserverdisconnected', onDisconnected);
     await openConnection();
   } catch (e) {
     if (e.name === 'NotFoundError' && !device) {       // the user closed the chooser
       setState('idle', 'not connected');
       return;
     }
-    setState('error', 'connection failed');
-    showMessage(`${e.name}: ${e.message}`);
+    failed(e);
+  }
+}
+
+// Reconnect: the device object from the chooser is kept, so there is no chooser (spec: Web App).
+async function onReconnectClick() {
+  if (!device) return;
+  try {
+    await openConnection();
+  } catch (e) {
+    failed(e);
   }
 }
 
 el.connect.addEventListener('click', onConnectClick);
+el.reconnect.addEventListener('click', onReconnectClick);
 el.disconnect.addEventListener('click', () => { if (device && device.gatt.connected) device.gatt.disconnect(); });
 el.slider.addEventListener('input', () => {
   const pct = Number(el.slider.value);

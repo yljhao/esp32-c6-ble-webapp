@@ -15,6 +15,7 @@
   <p>Status: <strong id="status" data-state="idle">not connected</strong></p>
   <p>
     <button id="connect" type="button">Connect</button>
+    <button id="reconnect" type="button" hidden>Reconnect</button>
     <button id="disconnect" type="button" hidden>Disconnect</button>
   </p>
 
@@ -25,7 +26,7 @@
   </p>
   <p>Board reports: <span id="board-brightness">-</span></p>
 
-  <p>Heartbeat seq <span id="hb-seq">-</span>, uptime <span id="hb-uptime">-</span></p>
+  <p>Heartbeat seq <span id="hb-seq">-</span>, uptime <span id="hb-uptime">-</span><span id="hb-note"></span></p>
   <p id="message" role="status"></p>
 </main>
 <script type="module" src="app.js"></script>

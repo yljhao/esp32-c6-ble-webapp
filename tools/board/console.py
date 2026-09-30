@@ -15,6 +15,7 @@ Library use (Harness): capture(...) returns [(t_rel, wallclock, text), ...].
 import argparse
 import datetime
 import os
+import queue
 import re
 import sys
 import time
@@ -33,11 +34,13 @@ def _open(port):
     # read(256) returns on 256 bytes or this timeout: lines are stamped when
     # the read returns, so keep it short (0.2 s batched Markers printed within
     # the same 200 ms onto one timestamp; 20 ms keeps the stamp within 20 ms).
-    return board_reset.open_exclusive(port, timeout=0.02)
+    ser = board_reset.open_exclusive(port, timeout=0.02)
+    ser.write_timeout = 2.0     # a stuck write must not stop the read loop for ever (SerialTimeoutException is a SerialException)
+    return ser
 
 
 def capture(port, seconds, do_reset=True, stop_when=None, sink=None, on_ready=None, linger=0.0,
-            send=None, stop_event=None):
+            send=None, stop_event=None, outbox=None):
     """Capture for `seconds` (0 = forever) or until stop_when(text) is true,
     plus `linger` seconds after that. sink(t_rel, wallclock, text) is called
     per line as it arrives; on_ready() once the port is open (and the reset
@@ -47,7 +50,11 @@ def capture(port, seconds, do_reset=True, stop_when=None, sink=None, on_ready=No
     the Harness types a serial-shell command with it and captures the
     board's response, no reset (the board keeps running).
     `stop_event` (a threading.Event) ends the capture when set: the Harness runs the capture in a
-    thread while it acts as a Central, and stops it once the Central is done."""
+    thread while it acts as a Central, and stops it once the Central is done.
+    `outbox` (a queue.Queue of (bytes, done) items) lets that other thread type on the console while
+    the capture runs (a serial-shell command in the middle of a scenario): each item is written from
+    this loop, then `done(wall_ms)` is called with the wall clock of the write (ms), or `done(None)`
+    when the port could not be written. Type at most ~50 bytes per item (the shell's RX ring)."""
     lines = []
     ser = _open(port)
     buf = b""
@@ -74,6 +81,17 @@ def capture(port, seconds, do_reset=True, stop_when=None, sink=None, on_ready=No
                 break
             if stop_at is not None and time.monotonic() >= stop_at:
                 break
+            if outbox is not None:
+                while True:
+                    try:
+                        data, done = outbox.get_nowait()
+                    except queue.Empty:
+                        break
+                    try:
+                        ser.write(data)
+                        done(time.time() * 1000)
+                    except (serial.SerialException, OSError):
+                        done(None)
             try:
                 chunk = ser.read(256)
             except serial.SerialException as e:

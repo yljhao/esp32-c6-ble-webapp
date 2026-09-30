@@ -19,7 +19,11 @@ one final `RESULT: PASS|FAIL (n/m checks)` line; exit 0 only on PASS.
                                 localhost, answers the device chooser through CDP DeviceAccess, and is cross-checked against
                                 the serial console (tools/webtest/board_web.py). [--web-dir DIR] serves another directory,
                                 [--web-url URL] tests a served page (e.g. the Pages URL) instead. No bleak Central runs in
-                                this mode: Chrome and the Harness Central never hold the PC's adapter together
+                                this mode: Chrome and the Harness Central never hold the PC's adapter together.
+                                Ticket 12 adds to the same Chrome session: a page-side Disconnect (last Heartbeat kept,
+                                Reconnect offered) and Reconnect without a chooser with the Brightness kept, then a board
+                                reboot (`kernel reboot` typed on the serial shell): disconnected within 5 s, Reconnect, slider
+                                50 %, Heartbeats from a small seq
     ./verify.sh --bite          watchdog bite scenario (separate mode, not part of the default run): builds the
                                 debug image (debug.conf, build dir build-debug), flashes it, types `debug hang`, expects
                                 a reset within ~5 s and `[BOOT] reason=watchdog`; then ALWAYS rebuilds and re-flashes
@@ -66,6 +70,7 @@ import datetime
 import fcntl
 import json
 import os
+import queue
 import re
 import subprocess
 import sys
@@ -114,7 +119,10 @@ REBOOT_WINDOW_S = 5.0        # a refused `kernel reboot` must show no [BOOT] in 
 SERIAL_REBOOT_S = 20.0       # `kernel reboot` on the serial shell: the [BOOT] marker follows within this
 WEB_ATTEMPTS = 4             # Chrome scenario runs when the PC's radio drops the Connection (see run_web)
 WEB_RETRY_PAUSE_S = 5.0      # the board advertises again within a second; give BlueZ a moment
-WEB_SCENARIO_S = WEB_ATTEMPTS * (120.0 + WEB_RETRY_PAUSE_S)       # bound on the whole Chrome scenario (connect up to 3 x 20 s is the worst case)
+# Worst case of one drive(): connect 3 x 20 s, steps and Heartbeat watch about 60 s, two reconnect phases of
+# 6 clicks x (20 s wait + 1 s pause), the reboot wait 15 s, the last Disconnect 10 s; rounded up.
+WEB_RUN_S = 60.0 + 3 * 20.0 + 2 * 6 * 21.0 + 15.0 + 10.0
+WEB_SCENARIO_S = WEB_ATTEMPTS * (WEB_RUN_S + WEB_RETRY_PAUSE_S)       # bound on the whole Chrome scenario
 BLE_LOG_TAIL_S = 1.0         # keep capturing this long after the last step
 LOCK_WAIT_S = 5.0
 # Bounds on the build.sh calls (the Harness never waits for ever while it holds the lock):
@@ -173,6 +181,18 @@ A_WEB_HB_UPDATES = "Web App: the displayed Heartbeat seq updates at least twice 
 A_WEB_HB_CONSOLE = "Web App: the displayed Heartbeat seq matches the console's [HB] markers (same numbers, same time)"
 A_WEB_UPTIME = "Web App: the displayed Heartbeat uptime is shown"
 A_WEB_DISCONNECT = "Web App: Disconnect shows disconnected, console [BLE] disconnected reason=0x13 then advertising again"
+A_WEB_KEPT_SEQ = ("Web App: after a page-side Disconnect the page shows disconnected, keeps the last Heartbeat seq on screen "
+                  "and offers Reconnect instead of Connect")
+A_WEB_PLAIN_NOCHOOSER = "Web App: Reconnect after a plain disconnect opens no chooser (no prompt, no requestDevice call) and shows connected"
+A_WEB_PLAIN_KEPT = ("Web App: after a plain disconnect and Reconnect the slider shows the Brightness set before it "
+                    "(25 % = 64), no reset in between")
+A_WEB_REBOOT_DROP = ("Web App: a board reboot (serial `kernel reboot`) makes the page show disconnected within 5 s, "
+                     "last seq still shown, Reconnect offered")
+A_WEB_REBOOT_BOOT = "Web App: the serial `kernel reboot` resets the board (next boot [BOOT] reason=software)"
+A_WEB_REBOOT_NOCHOOSER = "Web App: Reconnect after the reboot opens no chooser (no prompt, no requestDevice call) and shows connected"
+A_WEB_REBOOT_SLIDER = "Web App: after the reboot and Reconnect the slider shows 50 % (boot Brightness 128) from `led get`"
+A_WEB_REBOOT_RESUME = "Web App: Heartbeats resume from a small seq after the reboot (below the last one before it)"
+A_WEB_FINAL_ADV = "Web App: the last Disconnect leaves the board advertising (reason=0x13, advertising again)"
 A_WEB_CLEAN = "Web App: the page raised no error (page error, console error, failed request)"
 A_NOHANG = "production build carries no hang command"
 A_SOAK = "idle: no reset (no spurious watchdog bite)"
@@ -189,6 +209,7 @@ class BackgroundCapture:
         self.port, self.log_path, self.seconds = port, log_path, seconds
         self.lines = []
         self.error = None
+        self._outbox = queue.Queue()
         self._ready = threading.Event()
         self._stop = threading.Event()
         self._thread = threading.Thread(target=self._run, name="console-capture", daemon=True)
@@ -201,7 +222,7 @@ class BackgroundCapture:
                     f.write(console.fmt(t, w, s) + "\n")
                     f.flush()
                 console.capture(self.port, self.seconds, do_reset=False, sink=sink,
-                                on_ready=self._ready.set, stop_event=self._stop)
+                                on_ready=self._ready.set, stop_event=self._stop, outbox=self._outbox)
         except BaseException as e:      # reported by start()/stop(), never lost in the thread
             self.error = e
         finally:
@@ -221,6 +242,18 @@ class BackgroundCapture:
             raise OSError("console capture thread did not stop")
         if self.error:
             raise OSError(f"console capture failed: {self.error}")
+
+    def send(self, data, timeout=2.0):
+        """Type `data` (bytes, at most ~50) on the console from the capture thread; returns the wall clock
+        of the write in ms, or None when the port could not be written within `timeout` s."""
+        written = threading.Event()
+        box = []
+
+        def done(ms):
+            box.append(ms)
+            written.set()
+        self._outbox.put((data, done))
+        return box[0] if written.wait(timeout) else None
 
     def mark(self):
         return len(self.lines)
@@ -451,7 +484,76 @@ class Harness:
         page_ok = obs.get("status_after_disconnect") == "disconnected"
         self.check(A_WEB_DISCONNECT, disc_ok and page_ok,
                    f"{disc_detail}; page status {obs.get('status_after_disconnect')!r}, seq still {obs.get('seq_after_disconnect')!r}")
+        self.web_reconnect_checks(obs)
         self.web_finish_checks(obs)
+
+    @staticmethod
+    def reconnect_offered(view):
+        """The disconnected page offers Reconnect and nothing else (no Connect chooser, no Disconnect)."""
+        return bool(view["reconnect_visible"]) and not view["connect_visible"] and not view["disconnect_visible"]
+
+    def web_reconnect_checks(self, obs):
+        """Ticket 12: the disconnected page, the reconnect through the same device, the Brightness after a
+        plain disconnect and after a board reboot."""
+        plain = obs.get("plain") or {}
+        view = plain.get("view") or {}
+        if view:
+            ok, detail = checks.check_disconnect_shown(obs.get("status_log", []), plain["trigger_ms"], obs.get("hb_all", []), view["seq"])
+            offered = self.reconnect_offered(view)
+            self.check(A_WEB_KEPT_SEQ, ok and view["status"] == "disconnected" and offered,
+                       f"{detail}; status {view['status']!r}, note {view['note']!r}, uptime {view['uptime']!r}, "
+                       f"Reconnect visible {view['reconnect_visible']}, Connect visible {view['connect_visible']}")
+        else:
+            self.check(A_WEB_KEPT_SEQ, False, f"the scenario stopped before: {obs['error']}")
+        if "slider_pct" not in plain:
+            for name in (A_WEB_PLAIN_NOCHOOSER, A_WEB_PLAIN_KEPT):
+                self.check(name, False, f"no reconnect result: {obs['error']}; attempts {plain.get('attempts')}")
+        else:
+            tries = "; ".join(f"{a['state']} after {a['seconds']} s {a['message']}".strip() for a in plain["attempts"])
+            ok, detail = checks.check_reconnect_no_chooser(plain["prompts_before"], plain["prompts_after"],
+                                                           plain["requests_before"], plain["requests_after"], plain["state"])
+            self.check(A_WEB_PLAIN_NOCHOOSER, ok, f"{detail}; Reconnect click(s): {tries}")
+            ok, detail = checks.check_brightness_kept(plain["slider_pct"], plain["board_text"], plain["console_lines"],
+                                                      checks.WEB_KEPT_BRIGHTNESS)
+            self.check(A_WEB_PLAIN_KEPT, ok, f"{detail}; first Heartbeat after the reconnect {plain['first_hb']}")
+        reboot = obs.get("reboot") or {}
+        if "view" not in reboot:
+            for name in (A_WEB_REBOOT_DROP, A_WEB_REBOOT_BOOT, A_WEB_REBOOT_NOCHOOSER, A_WEB_REBOOT_SLIDER,
+                         A_WEB_REBOOT_RESUME, A_WEB_FINAL_ADV):
+                self.check(name, False, f"the scenario stopped before the reboot: {obs['error']}")
+            return
+        view = reboot["view"]
+        ok, detail = checks.check_disconnect_shown(reboot["status_log"], reboot["sent_ms"], obs.get("hb_all", []), view["seq"])
+        offered = self.reconnect_offered(view)
+        self.check(A_WEB_REBOOT_DROP, ok and offered,
+                   f"{detail}; status {view['status']!r}, Reconnect visible {view['reconnect_visible']}, "
+                   f"Connect visible {view['connect_visible']}")
+        if "console_lines" not in reboot:
+            self.check(A_WEB_REBOOT_BOOT, False, "no console capture of the reboot")
+        else:
+            self.check(A_WEB_REBOOT_BOOT, *checks.check_boot_reason(reboot["console_lines"], "software"))
+        if "slider_pct" not in reboot:
+            for name in (A_WEB_REBOOT_NOCHOOSER, A_WEB_REBOOT_SLIDER, A_WEB_REBOOT_RESUME, A_WEB_FINAL_ADV):
+                self.check(name, False, f"no reconnect result: {obs['error']}; attempts {reboot.get('attempts')}")
+            return
+        tries = "; ".join(f"{a['state']} after {a['seconds']} s {a['message']}".strip() for a in reboot["attempts"])
+        ok, detail = checks.check_reconnect_no_chooser(reboot["prompts_before"], reboot["prompts_after"],
+                                                       reboot["requests_before"], reboot["requests_after"], reboot["state"])
+        self.check(A_WEB_REBOOT_NOCHOOSER, ok, f"{detail}; Reconnect click(s): {tries}")
+        self.check(A_WEB_REBOOT_SLIDER, *checks.check_slider_shows_board(
+            reboot["slider_pct"], reboot["board_text"], reboot["console_lines"], expect_brightness=128))
+        first = reboot["first_hb"]
+        dropped_at = next((ms for ms, text in reboot["status_log"] if ms >= reboot["sent_ms"] and text == "disconnected"),
+                          reboot["sent_ms"])
+        seq_gone = checks.seq_shown_at(obs.get("hb_all", []), dropped_at)
+        if seq_gone is None:
+            self.check(A_WEB_REBOOT_RESUME, False, "no Heartbeat was on screen before the reboot to compare with")
+        else:
+            self.check(A_WEB_REBOOT_RESUME, *checks.check_resumed_after_reboot(seq_gone, first[1] if first else None))
+        if "final_lines" in obs:
+            self.check(A_WEB_FINAL_ADV, *checks.check_ble_disconnected(obs["final_lines"], BLE_REMOTE_TERMINATED))
+        else:
+            self.check(A_WEB_FINAL_ADV, False, f"the scenario stopped before the last Disconnect: {obs['error']}")
 
     def web_finish_checks(self, obs):
         self.check(A_WEB_CLEAN, not obs["page_errors"] and not obs["error"],

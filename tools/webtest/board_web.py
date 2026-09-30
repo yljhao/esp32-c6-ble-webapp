@@ -19,6 +19,9 @@ import time
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "verify"))
 
+import checks  # noqa: E402  (the shared literals of the scenario: WEB_KEPT_PCT, WEB_KEPT_BRIGHTNESS)
+
+KEPT_PCT, KEPT_BRIGHTNESS = checks.WEB_KEPT_PCT, checks.WEB_KEPT_BRIGHTNESS
 CHROME_FLAG = "--enable-experimental-web-platform-features"   # ADR-0002
 DEVICE_NAME_PREFIX = "XIAO-C6-LED"
 CONNECT_ATTEMPTS = 3          # a failed connect is repeated through the same device object (the PC's radio is flaky, board-notes)
@@ -29,8 +32,22 @@ ECHO_WAIT_S = 2.0             # the page's "board reports" text follows the repl
 HB_WATCH_S = 12.5             # after the first Heartbeat: 12 or 13 seq, so one is a multiple of 10 (the console marker)
 AFTER_STEPS_MIN_S = 9.5       # at least this long after the last slider step: three 3 s update windows (checks.check_hb_updates_retried)
 DISCONNECT_WAIT_S = 5.0
+RECONNECT_ATTEMPTS = 6        # Reconnect clicks (same device object, no chooser); a board that is still booting or a flaky radio needs a repeat
+RECONNECT_PAUSE_S = 1.0
+REBOOT_DROP_WAIT_S = 15.0     # how long to wait for the page to notice the reboot (the Check holds it to 5 s)
+FIRST_HB_WAIT_S = 6.0         # a Heartbeat follows a subscribe within this
+REBOOT_COMMAND = b"kernel reboot\r\n"  # typed on the serial shell (the Shell link refuses it, ticket 08)
 # (slider percent, Brightness the board must apply): literals from the spec, 100 % -> 255, 50 % -> 128, 0 % -> 0
 SLIDER_STEPS = ((0, 0), (100, 255), (50, 128))
+
+# Counts requestDevice calls, so "the reconnect opens no chooser" is proven on the page's side too.
+_COUNT_REQUESTS_JS = """() => {
+  window.__requestDeviceCalls = 0;
+  if (navigator.bluetooth) {
+    const original = navigator.bluetooth.requestDevice.bind(navigator.bluetooth);
+    navigator.bluetooth.requestDevice = (...args) => { window.__requestDeviceCalls++; return original(...args); };
+  }
+}"""
 
 _OBSERVE_JS = """() => {
   window.__hb = []; window.__status = [];
@@ -108,6 +125,62 @@ class _Chooser:
                 return
 
 
+def _status(page):
+    return page.get_attribute("#status", "data-state")
+
+
+def _reconnect(page, log, tag):
+    """Click Reconnect (repeated while the connect fails) until the page shows connected; returns
+    (connected, first click wall ms, [attempt records]). Never opens the chooser: the page hides Connect."""
+    attempts, first_ms = [], None
+    for attempt in range(1, RECONNECT_ATTEMPTS + 1):
+        t = time.monotonic()
+        first_ms = first_ms or time.time() * 1000
+        page.click("#reconnect")
+        try:
+            page.wait_for_function(
+                "['connected','error'].includes(document.getElementById('status').dataset.state)",
+                timeout=CONNECT_WAIT_S * 1000)
+        except Exception:
+            pass
+        state, message = _status(page), page.inner_text("#message")
+        attempts.append({"state": state, "message": message, "seconds": round(time.monotonic() - t, 2)})
+        log(f"web: {tag} reconnect attempt {attempt}: {state} in {time.monotonic() - t:.1f} s {message!r}")
+        if state == "connected":
+            return True, first_ms, attempts
+        time.sleep(RECONNECT_PAUSE_S)
+    return False, first_ms, attempts
+
+
+def _after_reconnect(page, cap, mark, click_ms, chooser, prompts_before, requests_before):
+    """What the page shows once it is connected again: the chooser counters, the re-synced slider and the
+    first Heartbeat displayed after the click."""
+    try:
+        page.wait_for_function("!document.getElementById('slider').disabled", timeout=SYNC_WAIT_S * 1000)
+    except Exception:
+        pass
+    deadline = time.monotonic() + FIRST_HB_WAIT_S
+    first = None
+    while first is None and time.monotonic() < deadline:
+        first = next((h for h in page.evaluate("window.__hb") if h[0] >= click_ms), None)
+        if first is None:
+            time.sleep(0.1)
+    time.sleep(0.3)              # the console line of the last reply
+    return {"prompts_before": prompts_before, "prompts_after": len(chooser.events),
+            "requests_before": requests_before, "requests_after": page.evaluate("window.__requestDeviceCalls"),
+            "state": _status(page), "slider_pct": int(page.input_value("#slider")),
+            "board_text": page.inner_text("#board-brightness"),
+            "first_hb": first, "console_lines": cap.since(mark)}
+
+
+def _disconnected_view(page):
+    """The disconnected page: status text, the Heartbeat left on screen, which buttons are offered."""
+    return {"status": page.inner_text("#status"), "seq": page.inner_text("#hb-seq"),
+            "uptime": page.inner_text("#hb-uptime"), "note": page.inner_text("#hb-note"),
+            "reconnect_visible": page.is_visible("#reconnect"), "connect_visible": page.is_visible("#connect"),
+            "disconnect_visible": page.is_visible("#disconnect")}
+
+
 def drive(url, cap, log=print, hb_watch_s=HB_WATCH_S):
     """Run the whole page scenario at `url`; returns the observation dict for the Checks.
     `cap` is a BackgroundCapture (no reset) of the board's console. Never raises for a page or
@@ -130,6 +203,7 @@ def drive(url, cap, log=print, hb_watch_s=HB_WATCH_S):
                         if m.type == "error" else None)
                 page.on("requestfailed", lambda r: obs["page_errors"].append(f"request failed: {r.url}"))
                 chooser = _Chooser(ctx.new_cdp_session(page))
+                page.add_init_script(f"({_COUNT_REQUESTS_JS})()")
                 page.goto(url)
                 page.evaluate(_OBSERVE_JS)
                 obs["bluetooth"] = page.evaluate("'bluetooth' in navigator")
@@ -142,7 +216,8 @@ def drive(url, cap, log=print, hb_watch_s=HB_WATCH_S):
                 for attempt in range(1, CONNECT_ATTEMPTS + 1):
                     t_click = time.monotonic()
                     t_first_click = t_first_click or t_click
-                    page.click("#connect")
+                    # after the chooser has been answered the page offers Reconnect instead of Connect
+                    page.click("#reconnect" if page.is_visible("#reconnect") else "#connect")
                     try:
                         page.wait_for_function(
                             "['connected','error'].includes(document.getElementById('status').dataset.state)",
@@ -218,8 +293,29 @@ def drive(url, cap, log=print, hb_watch_s=HB_WATCH_S):
                 obs["uptime_text"] = page.inner_text("#hb-uptime")
                 log(f"web: {len(obs['hb'])} Heartbeat display change(s), seq {[h[1] for h in obs['hb']]}")
 
+                # -- a Brightness that is not the boot one, then a page-side disconnect -------------------
+                mark_kept = cap.mark()
+                t_fill = time.monotonic()
+                page.fill("#slider", str(KEPT_PCT), timeout=5000)
+                lines = wait_console(cap, mark_kept, _has_led_marker, MARKER_WAIT_S)
+                time.sleep(0.3)
+                lines = cap.since(mark_kept)
+                try:
+                    page.wait_for_function(
+                        f"document.getElementById('board-brightness').textContent.startsWith('{KEPT_BRIGHTNESS} ')",
+                        timeout=ECHO_WAIT_S * 1000)
+                except Exception:
+                    pass
+                obs["steps"].append({"pct": KEPT_PCT, "want": KEPT_BRIGHTNESS, "lines": lines,
+                                     "echo_s": round(time.monotonic() - t_fill - 0.3, 2),
+                                     "echo": page.inner_text("#board-brightness"),
+                                     "slider_value": page.inner_text("#slider-value")})
+                log(f"web: slider {KEPT_PCT} % -> console {[t for _, _, t in lines if t.startswith('[LED]')]}")
+
                 # -- disconnect leaves the board advertising -------------------------------------------
+                seq_before = page.inner_text("#hb-seq")
                 mark = cap.mark()
+                click_ms = time.time() * 1000
                 page.click("#disconnect")
                 try:
                     page.wait_for_function("document.getElementById('status').dataset.state === 'disconnected'",
@@ -231,12 +327,81 @@ def drive(url, cap, log=print, hb_watch_s=HB_WATCH_S):
                 obs["disconnect_lines"] = wait_console(cap, mark, _has_disconnected, DISCONNECT_WAIT_S)
                 time.sleep(1.2)            # the advertising marker follows the disconnect marker
                 obs["disconnect_lines"] = cap.since(mark)
+                obs["stats"] = page.evaluate("window.__stats")
+
+                # -- ticket 12, plain disconnect: reconnect through the same device, the Brightness is kept --
+                plain = {"trigger_ms": click_ms, "seq_before": seq_before, "view": _disconnected_view(page)}
+                obs["plain"] = plain
+                prompts_before = len(chooser.events)
+                requests_before = page.evaluate("window.__requestDeviceCalls")
+                time.sleep(1.0)            # the board advertises again; BlueZ needs a moment
+                connected, first_ms, attempts = _reconnect(page, log, "plain")
+                plain["attempts"] = attempts
+                plain["click_ms"] = first_ms
+                if not connected:
+                    obs["error"] = f"the plain reconnect never showed connected ({attempts[-1]})"
+                    obs["status_log"] = page.evaluate("window.__status")
+                    obs["hb_all"] = page.evaluate("window.__hb")
+                    return obs
+                plain.update(_after_reconnect(page, cap, mark_kept, first_ms, chooser, prompts_before, requests_before))
+                log(f"web: plain reconnect: slider {plain['slider_pct']} %, board reports {plain['board_text']!r}, "
+                    f"first Heartbeat {plain['first_hb']}, chooser events {plain['prompts_before']}->{plain['prompts_after']}")
+
+                # -- ticket 12, board reboot: disconnected within 5 s, last seq kept, reconnect, boot Brightness --
+                time.sleep(3.0)            # a few Heartbeats on screen to keep
+                reboot = {"seq_before": page.inner_text("#hb-seq")}
+                obs["reboot"] = reboot
+                prompts_before = len(chooser.events)
+                requests_before = page.evaluate("window.__requestDeviceCalls")
+                mark_reboot = cap.mark()
+                sent_ms = cap.send(REBOOT_COMMAND)
+                reboot["sent_ms"] = sent_ms
+                if sent_ms is None:
+                    obs["error"] = "could not type `kernel reboot` on the serial shell"
+                    obs["hb_all"] = page.evaluate("window.__hb")
+                    return obs
+                log(f"web: `kernel reboot` typed, page shows seq {reboot['seq_before']}")
+                try:
+                    page.wait_for_function("document.getElementById('status').dataset.state === 'disconnected'",
+                                           timeout=REBOOT_DROP_WAIT_S * 1000)
+                except Exception:
+                    pass
+                reboot["view"] = _disconnected_view(page)
+                reboot["status_log"] = page.evaluate("window.__status")
+                log(f"web: after the reboot the page shows {reboot['view']}")
+                connected, first_ms, attempts = _reconnect(page, log, "reboot")
+                reboot["attempts"] = attempts
+                reboot["click_ms"] = first_ms
+                if not connected:
+                    obs["error"] = f"the reconnect after the reboot never showed connected ({attempts[-1]})"
+                    obs["status_log"] = page.evaluate("window.__status")
+                    obs["hb_all"] = page.evaluate("window.__hb")
+                    reboot["console_lines"] = cap.since(mark_reboot)
+                    return obs
+                reboot.update(_after_reconnect(page, cap, mark_reboot, first_ms, chooser, prompts_before, requests_before))
+                log(f"web: reboot reconnect: slider {reboot['slider_pct']} %, board reports {reboot['board_text']!r}, "
+                    f"first Heartbeat {reboot['first_hb']}, chooser events {reboot['prompts_before']}->{reboot['prompts_after']}")
+
+                # -- leave the board advertising: a last page-side disconnect ---------------------------------
+                mark = cap.mark()
+                page.click("#disconnect")
+                try:
+                    page.wait_for_function("document.getElementById('status').dataset.state === 'disconnected'",
+                                           timeout=DISCONNECT_WAIT_S * 1000)
+                except Exception:
+                    pass
+                wait_console(cap, mark, _has_disconnected, DISCONNECT_WAIT_S)
+                time.sleep(1.2)
+                obs["final_lines"] = cap.since(mark)
                 obs["status_log"] = page.evaluate("window.__status")
+                obs["hb_all"] = page.evaluate("window.__hb")
                 obs["stats"] = page.evaluate("window.__stats")
             except Exception as e:
                 obs["error"] = f"{type(e).__name__}: {e}"
                 _restore_brightness(page, log)
             finally:
+                if obs["error"]:
+                    _restore_brightness(page, log)   # an aborted scenario must not leave the User LED at 25 %
                 ctx.close()      # inside the driver context, so Chrome is stopped before the profile goes
     except Exception as e:
         obs["error"] = f"{type(e).__name__}: {e}"

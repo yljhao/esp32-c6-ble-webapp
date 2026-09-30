@@ -575,9 +575,18 @@ class LedApplied(unittest.TestCase):
         self.assertIn("out of tolerance", detail)
 
     def test_level_without_a_tolerance_is_refused(self):
-        ok, detail = checks.check_led_applied(cap("[LED] brightness=64 duty=25.0% freq=19998"), 64)
+        ok, detail = checks.check_led_applied(cap("[LED] brightness=100 duty=39.2% freq=19998"), 100)
         self.assertFalse(ok)
         self.assertIn("no tolerance", detail)
+
+    def test_64_reads_25_percent_low_within_one_percent(self):
+        # Ticket 12: slider 25 % -> Brightness 64 -> 64 * 100 / 255 = 25.1 % low, near 20 kHz.
+        self.assertTrue(checks.check_led_applied(cap("[LED] brightness=64 duty=25.0% freq=19988"), 64)[0])
+        self.assertTrue(checks.check_led_applied(cap("[LED] brightness=64 duty=26.0% freq=20000"), 64)[0])
+        ok, detail = checks.check_led_applied(cap("[LED] brightness=64 duty=27.5% freq=20000"), 64)
+        self.assertFalse(ok)
+        self.assertIn("out of tolerance", detail)
+        self.assertFalse(checks.check_led_applied(cap("[LED] brightness=64 duty=25.0% freq=0"), 64)[0])
 
 
 class NoLedMarker(unittest.TestCase):
@@ -881,3 +890,125 @@ class StallSurvived(unittest.TestCase):
         ok, detail = checks.check_stall_survived(lines, 12.0)
         self.assertFalse(ok)
         self.assertIn("dropped", detail)
+
+
+class WebDisconnectShown(unittest.TestCase):
+    """Ticket 12: the page says disconnected within 5 s and keeps the last Heartbeat seq on screen."""
+
+    STATUS = [(1000, "connected"), (61000, "disconnected")]
+    HB = [(55000, 41, "0:00:41.000"), (57000, 42, "0:00:42.000")]
+
+    def test_shown_in_time_with_the_seq_kept_passes(self):
+        ok, detail = checks.check_disconnect_shown(self.STATUS, 58000, self.HB, "42")
+        self.assertTrue(ok, detail)
+        self.assertIn("3.0 s", detail)
+        self.assertIn("seq 42", detail)
+
+    def test_shown_too_late_fails(self):
+        ok, detail = checks.check_disconnect_shown(self.STATUS, 55000, self.HB, "42")
+        self.assertFalse(ok)
+        self.assertIn("limit 5 s", detail)
+
+    def test_never_shown_fails(self):
+        ok, detail = checks.check_disconnect_shown([(1000, "connected")], 58000, self.HB, "42")
+        self.assertFalse(ok)
+        self.assertIn("never", detail)
+
+    def test_a_disconnected_before_the_trigger_does_not_count(self):
+        ok, _ = checks.check_disconnect_shown([(1000, "disconnected"), (2000, "connected")], 58000, self.HB, "42")
+        self.assertFalse(ok)
+
+    def test_a_seq_that_was_cleared_fails(self):
+        ok, detail = checks.check_disconnect_shown(self.STATUS, 58000, self.HB, "-")
+        self.assertFalse(ok)
+        self.assertIn("'-'", detail)
+
+    def test_a_seq_that_changed_after_the_drop_fails(self):
+        self.assertFalse(checks.check_disconnect_shown(self.STATUS, 58000, self.HB, "43")[0])
+
+    def test_a_heartbeat_that_arrived_after_the_drop_is_not_the_one_kept(self):
+        hb = self.HB + [(62000, 43, "0:00:43.000")]
+        self.assertTrue(checks.check_disconnect_shown(self.STATUS, 58000, hb, "42")[0])
+
+    def test_no_heartbeat_before_the_drop_fails(self):
+        ok, detail = checks.check_disconnect_shown(self.STATUS, 58000, [(62000, 43, "x")], "43")
+        self.assertFalse(ok)
+        self.assertIn("no Heartbeat", detail)
+
+
+class WebSeqShownAt(unittest.TestCase):
+    HB = [(1000, 5, "a"), (2000, 6, "b"), (3000, 7, "c")]
+
+    def test_the_last_change_at_or_before(self):
+        self.assertEqual(checks.seq_shown_at(self.HB, 2500), 6)
+        self.assertEqual(checks.seq_shown_at(self.HB, 3000), 7)
+
+    def test_none_before_the_first(self):
+        self.assertIsNone(checks.seq_shown_at(self.HB, 500))
+        self.assertIsNone(checks.seq_shown_at([], 500))
+
+
+class WebReconnectNoChooser(unittest.TestCase):
+    def test_no_new_prompt_and_no_request_passes(self):
+        self.assertTrue(checks.check_reconnect_no_chooser(1, 1, 1, 1, "connected")[0])
+
+    def test_a_new_chooser_prompt_fails(self):
+        ok, detail = checks.check_reconnect_no_chooser(1, 3, 1, 1, "connected")
+        self.assertFalse(ok)
+        self.assertIn("prompt", detail)
+
+    def test_a_requestDevice_call_fails(self):
+        ok, detail = checks.check_reconnect_no_chooser(1, 1, 1, 2, "connected")
+        self.assertFalse(ok)
+        self.assertIn("requestDevice", detail)
+
+    def test_not_connected_fails(self):
+        ok, detail = checks.check_reconnect_no_chooser(1, 1, 1, 1, "error")
+        self.assertFalse(ok)
+        self.assertIn("error", detail)
+
+
+class WebResumedAfterReboot(unittest.TestCase):
+    def test_a_small_seq_below_the_old_one_passes(self):
+        ok, detail = checks.check_resumed_after_reboot(90, 4)
+        self.assertTrue(ok, detail)
+
+    def test_a_seq_that_kept_counting_fails(self):
+        ok, detail = checks.check_resumed_after_reboot(90, 95)
+        self.assertFalse(ok)
+        self.assertIn("not below", detail)
+
+    def test_a_large_seq_fails_even_below_the_old_one(self):
+        ok, detail = checks.check_resumed_after_reboot(500, 200)
+        self.assertFalse(ok)
+        self.assertIn("small", detail)
+
+    def test_no_heartbeat_fails(self):
+        self.assertFalse(checks.check_resumed_after_reboot(90, None)[0])
+
+    def test_the_limit_is_included(self):
+        self.assertTrue(checks.check_resumed_after_reboot(90, checks.WEB_RESUME_MAX_SEQ)[0])
+        self.assertFalse(checks.check_resumed_after_reboot(90, checks.WEB_RESUME_MAX_SEQ + 1)[0])
+
+
+class WebBrightnessKept(unittest.TestCase):
+    """A plain disconnect and reconnect (no reboot) keeps the Brightness set before it."""
+
+    SET = "[LED] brightness=64 duty=25.1% freq=20000"
+
+    def test_slider_and_text_at_the_set_value_pass(self):
+        ok, detail = checks.check_brightness_kept(25, "64 (25 %)", cap(self.SET, "[BLE] disconnected reason=0x13"), 64)
+        self.assertTrue(ok, detail)
+
+    def test_a_reset_in_between_fails(self):
+        lines = cap(self.SET, "ESP-ROM:esp32c6", "[BOOT] reason=software", "[LED] brightness=128 duty=50.0% freq=20000")
+        ok, detail = checks.check_brightness_kept(50, "128 (50 %)", lines, 64)
+        self.assertFalse(ok)
+        self.assertIn("reset", detail)
+
+    def test_a_slider_that_shows_another_value_fails(self):
+        self.assertFalse(checks.check_brightness_kept(50, "64 (25 %)", cap(self.SET), 64)[0])
+
+    def test_a_console_that_no_longer_holds_the_value_fails(self):
+        lines = cap(self.SET, "[LED] brightness=128 duty=50.0% freq=20000")
+        self.assertFalse(checks.check_brightness_kept(25, "64 (25 %)", lines, 64)[0])
