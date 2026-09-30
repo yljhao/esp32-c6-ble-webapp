@@ -8,7 +8,7 @@ Spec: `.scratch/ble-webapp/spec.md` (Heartbeat rules, Wire contract). Glossary: 
 
 **Board:** required
 
-**Status:** ready-for-agent
+**Status:** done
 
 - [x] The Harness receives 10 s of Heartbeat lines with consecutive `seq` and 1 s ± 200 ms spacing, interleaved correctly with `led` replies sent during that time.
 - [x] After a 5 s disconnect the first `seq` received is about 5 higher than the last one before it.
