@@ -191,6 +191,62 @@ if (logic) {
   });
 }
 
+// -- slider send policy and uptime text (ticket 11) --------------------------------------------
+// Testing call (ticket 11): LatestWins is slow-rules logic (a Web Bluetooth write cannot overlap
+// another, and a dragged slider fires far faster than the link answers), so it is unit-tested;
+// formatUptime is plain arithmetic. Expected values are literals.
+if (logic) {
+  const { LatestWins, formatUptime } = logic;
+
+  test('LatestWins: the first request goes out at once', () => {
+    const q = new LatestWins();
+    eq(q.request(7), 7);
+  });
+  test('LatestWins: requests while one is in flight are held, only the newest survives', () => {
+    const q = new LatestWins();
+    eq(q.request(1), 1);
+    eq(q.request(2), null);
+    eq(q.request(3), null);
+    eq(q.done(), 3);      // 2 was overtaken and never sent
+    eq(q.done(), null);   // nothing more is waiting
+  });
+  test('LatestWins: after the queue drained a new request goes out at once again', () => {
+    const q = new LatestWins();
+    q.request(1);
+    eq(q.done(), null);
+    eq(q.request(2), 2);
+  });
+  test('LatestWins: a value equal to the one in flight is still sent after it (0 % twice is not a no-op)', () => {
+    const q = new LatestWins();
+    eq(q.request(5), 5);
+    eq(q.request(5), null);
+    eq(q.done(), 5);
+  });
+  test('LatestWins: 0 is a value, not "nothing"', () => {
+    const q = new LatestWins();
+    eq(q.request(1), 1);
+    eq(q.request(0), null);
+    eq(q.done(), 0);
+  });
+  test('LatestWins: reset drops the held value and the in-flight state (a new Connection)', () => {
+    const q = new LatestWins();
+    q.request(1);
+    q.request(2);
+    q.reset();
+    eq(q.request(9), 9);
+  });
+  test('formatUptime: milliseconds as h:mm:ss.mmm', () => {
+    eq(formatUptime(0), '0:00:00.000');
+    eq(formatUptime(5702), '0:00:05.702');
+    eq(formatUptime(48655), '0:00:48.655');
+    eq(formatUptime(3600000 + 61001), '1:01:01.001');
+    eq(formatUptime(100 * 3600000), '100:00:00.000');
+  });
+  test('formatUptime: a non-integer or negative input throws', () => {
+    for (const bad of [-1, 1.5, NaN, '5', null]) throws(() => formatUptime(bad), RangeError, `formatUptime(${String(bad)}) `);
+  });
+}
+
 // -- the module stays pure ---------------------------------------------------------------------
 test('webapp/logic.js touches no DOM, Web Bluetooth, timer or other module (source scan)', async () => {
   const source = await (await fetch('/webapp/logic.js')).text();

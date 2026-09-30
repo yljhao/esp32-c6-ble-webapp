@@ -4,12 +4,30 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>XIAO-C6-LED</title>
+<link rel="icon" href="data:,">
 <link rel="stylesheet" href="style.css">
 </head>
 <body>
 <main>
   <h1>XIAO-C6-LED</h1>
   <p>Web Bluetooth LED control for the XIAO ESP32-C6.</p>
+
+  <p>Status: <strong id="status" data-state="idle">not connected</strong></p>
+  <p>
+    <button id="connect" type="button">Connect</button>
+    <button id="disconnect" type="button" hidden>Disconnect</button>
+  </p>
+
+  <p>
+    <label for="slider">Brightness</label>
+    <input id="slider" type="range" min="0" max="100" step="1" value="0" disabled>
+    <output id="slider-value" for="slider">-</output>
+  </p>
+  <p>Board reports: <span id="board-brightness">-</span></p>
+
+  <p>Heartbeat seq <span id="hb-seq">-</span>, uptime <span id="hb-uptime">-</span></p>
+  <p id="message" role="status"></p>
 </main>
+<script type="module" src="app.js"></script>
 </body>
 </html>

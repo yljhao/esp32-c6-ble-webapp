@@ -179,3 +179,53 @@ export function ledSetCommand(brightness) {
   assertBrightness(brightness);
   return `led set ${brightness}\n`;
 }
+
+// -- slider send policy (ticket 11) ---------------------------------------------------------------
+
+/**
+ * One Web Bluetooth write may be in flight at a time (a second one throws "GATT operation already
+ * in progress"), and a dragged slider fires faster than the link answers. request() returns the
+ * value to send now, or null when a write is in flight (the value is held; a newer one replaces
+ * it). done() ends the write in flight and returns the held value to send next, or null.
+ */
+export class LatestWins {
+  #busy = false;
+  #held = null;
+
+  request(value) {
+    if (this.#busy) {
+      this.#held = { value };
+      return null;
+    }
+    this.#busy = true;
+    return value;
+  }
+
+  done() {
+    if (this.#held === null) {
+      this.#busy = false;
+      return null;
+    }
+    const { value } = this.#held;
+    this.#held = null;      // stays busy: the caller sends `value` now
+    return value;
+  }
+
+  /** Forget everything, e.g. at a new Connection. */
+  reset() {
+    this.#busy = false;
+    this.#held = null;
+  }
+}
+
+// -- uptime text ----------------------------------------------------------------------------------
+
+/** Board uptime in ms (non-negative integer) -> `h:mm:ss.mmm`. */
+export function formatUptime(ms) {
+  if (!Number.isInteger(ms) || ms < 0) throw new RangeError(`uptime must be a non-negative integer, got ${ms}`);
+  const pad = (n, width) => String(n).padStart(width, '0');
+  const h = Math.floor(ms / 3600000);
+  const m = Math.floor(ms / 60000) % 60;
+  const s = Math.floor(ms / 1000) % 60;
+  return `${h}:${pad(m, 2)}:${pad(s, 2)}.${pad(ms % 1000, 3)}`;
+}

@@ -16,6 +16,11 @@
 #                               Central line logic); project .venv, no board, no Bluetooth, no serial
 #   ./build.sh test-web         the Web App logic tests (webapp/logic.js) in headless Google Chrome through
 #                               Playwright (channel="chrome", no Web Bluetooth, no board); project .venv
+#   ./build.sh test-web-board [ARGS...]
+#                               the Web App in real Google Chrome against the board (ticket 11): ./verify.sh --web
+#                               (builds, resets the board, drives the page, cross-checks the serial console; needs
+#                               the board and the PC's Bluetooth adapter, so it is NOT part of `test`);
+#                               ARGS: --flash, --web-dir DIR, --web-url URL
 #   ./build.sh test [ARGS...]   host unit suites: twister over tests/ on native_sim, no board, then the
 #                               esptool guard's own red-path test, test-tools and test-web;
 #                               exits non-zero on any failure.
@@ -182,5 +187,6 @@ case "${1:-}" in
   test)     shift; cmd_test "$@" ;;
   test-tools) cmd_test_tools ;;
   test-web) cmd_test_web ;;
-  *)        sed -n '2,27p' "$0" | sed 's/^# \{0,1\}//'; exit 2 ;;
+  test-web-board) shift; exec "$ROOT/verify.sh" --web "$@" ;;
+  *)        sed -n '2,32p' "$0" | sed 's/^# \{0,1\}//'; exit 2 ;;
 esac

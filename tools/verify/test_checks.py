@@ -625,6 +625,187 @@ class SerialLedReplies(unittest.TestCase):
 
 
 
+class WebHeartbeatUpdates(unittest.TestCase):
+    """Web App (ticket 11): the Heartbeat seq the page displays updates at least twice within 3 s.
+    `changes` are the page's display changes [(wall_ms, seq)], oldest first."""
+
+    def test_three_updates_within_the_window_pass(self):
+        ok, detail = checks.check_hb_updates([(0, 1), (1000, 2), (2000, 3), (3000, 4)], start_ms=0)
+        self.assertTrue(ok)
+        self.assertIn("3 update(s)", detail)
+
+    def test_exactly_two_updates_pass(self):
+        ok, _ = checks.check_hb_updates([(500, 1), (1500, 2), (2500, 3), (9000, 4)], start_ms=400,
+                                        observed_until_ms=9000)
+        self.assertTrue(ok)
+
+    def test_one_update_fails(self):
+        ok, detail = checks.check_hb_updates([(500, 1), (3600, 2), (4500, 3)], start_ms=400,
+                                             observed_until_ms=5000)
+        self.assertFalse(ok)
+        self.assertIn("1 update(s)", detail)
+
+    def test_no_update_fails(self):
+        ok, _ = checks.check_hb_updates([], start_ms=0, observed_until_ms=5000)
+        self.assertFalse(ok)
+
+    def test_an_update_after_the_window_does_not_count(self):
+        ok, _ = checks.check_hb_updates([(1000, 1), (3001, 2), (3500, 3)], start_ms=0,
+                                        observed_until_ms=4000)
+        self.assertFalse(ok)
+
+    def test_a_repeated_seq_is_not_an_update(self):
+        ok, _ = checks.check_hb_updates([(100, 5), (1000, 5), (2000, 5)], start_ms=0, observed_until_ms=4000)
+        self.assertFalse(ok)
+
+    def test_an_observation_that_ended_inside_the_window_cannot_pass_or_fail_the_page(self):
+        ok, detail = checks.check_hb_updates([(500, 1), (1500, 2)], start_ms=0, observed_until_ms=2000)
+        self.assertFalse(ok)
+        self.assertIn("ended", detail)
+
+
+class WebHeartbeatUpdatesRetried(unittest.TestCase):
+    """The PC's radio delivers Heartbeats late and in bunches (board-notes: radio episodes), so a
+    3 s window that saw fewer than 2 updates is repeated on the next window, at most 3 windows, but
+    only when the board's own uptime steps (shown by the page) are exactly 1000 ms per seq: then the
+    board did its part and the delay is the link's."""
+
+    @staticmethod
+    def hb(*rows):
+        """rows of (wall_ms, seq, uptime_ms) -> the page's display log [(wall_ms, seq, 'h:mm:ss.mmm')]."""
+        def fmt(ms):
+            return f"{ms // 3600000}:{ms // 60000 % 60:02d}:{ms // 1000 % 60:02d}.{ms % 1000:03d}"
+        return [(w, n, fmt(u)) for w, n, u in rows]
+
+    def test_first_window_passing_is_reported_as_window_1(self):
+        rows = self.hb((100, 1, 1000), (1100, 2, 2000), (2100, 3, 3000), (3100, 4, 4000))
+        ok, detail = checks.check_hb_updates_retried(rows, start_ms=0, observed_until_ms=12000)
+        self.assertTrue(ok)
+        self.assertIn("window 1", detail)
+
+    def test_a_late_bunch_passes_on_a_later_window_when_the_board_spacing_is_exact(self):
+        rows = self.hb((100, 1, 1000), (4000, 2, 2000), (4010, 3, 3000), (5000, 4, 4000), (6000, 5, 5000))
+        ok, detail = checks.check_hb_updates_retried(rows, start_ms=0, observed_until_ms=12000)
+        self.assertTrue(ok)
+        self.assertIn("window 2", detail)
+        self.assertIn("link jitter", detail)
+
+    def test_a_retry_is_not_credited_when_the_board_spacing_is_off(self):
+        rows = self.hb((100, 1, 1000), (4000, 2, 2000), (5000, 3, 3500), (6000, 4, 4500), (7000, 5, 5500))
+        ok, detail = checks.check_hb_updates_retried(rows, start_ms=0, observed_until_ms=12000)
+        self.assertFalse(ok)
+        self.assertIn("uptime", detail)
+
+    def test_three_dead_windows_fail(self):
+        rows = self.hb((100, 1, 1000))
+        ok, _ = checks.check_hb_updates_retried(rows, start_ms=0, observed_until_ms=12000)
+        self.assertFalse(ok)
+
+    def test_a_missing_seq_between_two_rows_scales_the_expected_uptime_step(self):
+        rows = self.hb((100, 1, 1000), (4000, 3, 3000), (5000, 4, 4000), (6000, 5, 5000))
+        ok, _ = checks.check_hb_updates_retried(rows, start_ms=0, observed_until_ms=12000)
+        self.assertTrue(ok)
+
+    def test_an_observation_shorter_than_the_windows_cannot_pass_a_later_one(self):
+        rows = self.hb((100, 1, 1000), (4000, 2, 2000), (4010, 3, 3000))
+        ok, _ = checks.check_hb_updates_retried(rows, start_ms=0, observed_until_ms=5000)
+        self.assertFalse(ok)
+
+
+class WebPageMatchesConsole(unittest.TestCase):
+    """The page's displayed seq against the console's `[HB] seq=N` marker (every tenth Heartbeat)."""
+
+    @staticmethod
+    def console(*pairs):
+        import datetime
+        base = datetime.datetime(2026, 9, 30, 12, 0, 0)
+        return [(0.0, base + datetime.timedelta(milliseconds=ms), f"[HB] seq={n}") for ms, n in pairs]
+
+    def changes(self, *pairs):
+        import datetime
+        base = datetime.datetime(2026, 9, 30, 12, 0, 0).timestamp() * 1000
+        return [(base + ms, n) for ms, n in pairs]
+
+    def test_a_shown_tenth_seq_on_the_console_within_the_skew_passes(self):
+        ok, detail = checks.check_page_matches_console(
+            self.changes((0, 9), (1000, 10), (2000, 11)), self.console((980, 10)))
+        self.assertTrue(ok)
+        self.assertIn("seq 10", detail)
+
+    def test_a_skew_above_the_limit_fails(self):
+        ok, detail = checks.check_page_matches_console(
+            self.changes((0, 9), (3000, 10)), self.console((980, 10)), max_skew_s=1.5)
+        self.assertFalse(ok)
+        self.assertIn("seq 10", detail)
+
+    def test_no_console_marker_for_any_displayed_seq_fails(self):
+        ok, _ = checks.check_page_matches_console(self.changes((0, 3), (1000, 4)), self.console((500, 10)))
+        self.assertFalse(ok)
+
+    def test_a_page_seq_that_goes_backwards_fails(self):
+        ok, detail = checks.check_page_matches_console(
+            self.changes((0, 9), (1000, 10), (2000, 8)), self.console((980, 10)))
+        self.assertFalse(ok)
+        self.assertIn("backwards", detail)
+
+    def test_the_console_marker_the_page_never_showed_is_not_a_failure_when_another_matches(self):
+        ok, _ = checks.check_page_matches_console(
+            self.changes((0, 9), (1000, 10), (2000, 11), (12000, 21)), self.console((980, 10), (10980, 20)))
+        self.assertTrue(ok)
+
+    def test_no_page_change_at_all_fails(self):
+        ok, _ = checks.check_page_matches_console([], self.console((980, 10)))
+        self.assertFalse(ok)
+
+
+class WebSliderShowsBoard(unittest.TestCase):
+    """After connecting, the slider shows the Brightness the console last reported."""
+
+    def test_128_shows_50_percent(self):
+        ok, detail = checks.check_slider_shows_board(50, "128 (50 %)", cap("[LED] brightness=128 duty=50.0% freq=20000"))
+        self.assertTrue(ok)
+        self.assertIn("brightness=128", detail)
+
+    def test_the_last_marker_counts(self):
+        lines = cap("[LED] brightness=128 duty=50.0% freq=20000", "[LED] brightness=255 duty=100.0% freq=0")
+        self.assertTrue(checks.check_slider_shows_board(100, "255 (100 %)", lines)[0])
+        self.assertFalse(checks.check_slider_shows_board(50, "128 (50 %)", lines)[0])
+
+    def test_a_slider_that_still_shows_zero_fails(self):
+        self.assertFalse(checks.check_slider_shows_board(0, "-", cap("[LED] brightness=128 duty=50.0% freq=20000"))[0])
+
+    def test_a_board_text_that_disagrees_with_the_console_fails(self):
+        ok, detail = checks.check_slider_shows_board(50, "64 (25 %)", cap("[LED] brightness=128 duty=50.0% freq=20000"))
+        self.assertFalse(ok)
+        self.assertIn("64 (25 %)", detail)
+
+    def test_no_led_marker_fails(self):
+        self.assertFalse(checks.check_slider_shows_board(50, "128 (50 %)", cap("tick"))[0])
+
+    def test_an_expected_brightness_makes_a_consistent_but_other_value_fail(self):
+        lines = cap("[LED] brightness=255 duty=100.0% freq=0")
+        self.assertTrue(checks.check_slider_shows_board(100, "255 (100 %)", lines)[0])
+        ok, detail = checks.check_slider_shows_board(100, "255 (100 %)", lines, expect_brightness=128)
+        self.assertFalse(ok)
+        self.assertIn("expected 128", detail)
+
+    def test_an_expected_brightness_that_matches_passes(self):
+        lines = cap("[LED] brightness=128 duty=50.2% freq=19995")
+        self.assertTrue(checks.check_slider_shows_board(50, "128 (50 %)", lines, expect_brightness=128)[0])
+
+
+class LinkLost(unittest.TestCase):
+    def test_a_supervision_timeout_is_a_lost_link(self):
+        self.assertTrue(checks.is_ble_link_lost("[BLE] disconnected reason=0x08"))
+
+    def test_the_central_asking_to_disconnect_is_not(self):
+        self.assertFalse(checks.is_ble_link_lost("[BLE] disconnected reason=0x13"))
+
+    def test_other_lines_are_not(self):
+        self.assertFalse(checks.is_ble_link_lost("[BLE] connected"))
+        self.assertFalse(checks.is_ble_link_lost("[BLE] disconnected reason=zzz"))
+
+
 if __name__ == "__main__":
     unittest.main()
 

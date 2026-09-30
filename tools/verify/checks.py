@@ -511,3 +511,139 @@ def check_stall_survived(lines, min_s, min_markers=2):
         return False, "no '[HB] link stalled: ... dropped' report, the bounded drop policy did not run"
     return True, (f"no reset in {end:.1f}s after the stall, {len(markers)} [HB] markers "
                   f"(seq {markers[0]}..{markers[-1]}), {dropped[-1]} stale heartbeat(s) reported dropped")
+
+
+# -- Web App in Chrome against the board (ticket 11) ------------------------------------------------
+WEB_UPDATE_WINDOW_S = 3.0    # spec: the displayed seq updates at least twice within 3 s
+WEB_MIN_UPDATES = 2
+WEB_MAX_SKEW_S = 1.5         # page and console see one Heartbeat this close in PC time (the connection interval is 45 ms)
+
+
+def check_hb_updates(changes, start_ms, window_s=WEB_UPDATE_WINDOW_S, min_updates=WEB_MIN_UPDATES,
+                     observed_until_ms=None):
+    """The Heartbeat `seq` the page displays changes at least `min_updates` times in the `window_s`
+    seconds after `start_ms`. `changes` is the page's display log [(wall_ms, seq), ...], oldest first
+    (an entry per change of the displayed text); a repeated seq is not an update. `observed_until_ms`
+    is when the observation ended (default: the last change): a window it does not cover cannot be judged."""
+    end = start_ms + window_s * 1000
+    observed = changes[-1][0] if observed_until_ms is None and changes else observed_until_ms
+    if observed is None or observed < end:
+        return False, f"the observation ended before the {window_s:g} s window did"
+    updates, previous = [], None
+    for ms, seq in changes:
+        if start_ms < ms <= end and seq != previous:
+            updates.append((ms - start_ms, seq))
+        previous = seq
+    detail = (f"{len(updates)} update(s) in {window_s:g} s: "
+              + ", ".join(f"seq {n} at +{ms / 1000:.2f}s" for ms, n in updates))
+    return len(updates) >= min_updates, detail
+
+
+def check_page_matches_console(changes, lines, max_skew_s=WEB_MAX_SKEW_S):
+    """The page shows the same Heartbeats the console counts: its displayed seq never goes backwards,
+    and for at least one `[HB] seq=N` marker (every tenth) the page showed N within `max_skew_s` of the
+    marker's wall-clock time; every such match must be within the skew. `changes` are [(wall_ms, seq)],
+    `lines` the console capture (t_rel, wallclock datetime, text). A marker the page never showed is
+    tolerated (the PC's radio can lose a notification's timing, not its number, but a page may join late)."""
+    if not changes:
+        return False, "the page displayed no Heartbeat"
+    for (_, a), (_, b) in zip(changes, changes[1:]):
+        if b < a:
+            return False, f"the page's seq went backwards: {a} then {b}"
+    shown = {}
+    for ms, seq in changes:
+        shown.setdefault(seq, ms)
+    matches = []
+    for _, wall, text in lines:
+        n = parse_hb_marker(text)
+        if n is None or n not in shown or wall is None:
+            continue
+        skew = abs(shown[n] - wall.timestamp() * 1000) / 1000
+        matches.append((n, skew))
+    if not matches:
+        return False, (f"no [HB] marker on the console for a seq the page showed "
+                       f"({changes[0][1]}..{changes[-1][1]})")
+    worst = max(matches, key=lambda m: m[1])
+    detail = ", ".join(f"seq {n} skew {s:.2f}s" for n, s in matches)
+    if worst[1] > max_skew_s:
+        return False, f"{detail}; seq {worst[0]} is more than {max_skew_s:g}s apart"
+    return True, detail
+
+
+def check_slider_shows_board(slider_pct, board_text, lines, expect_brightness=None):
+    """After connecting, the slider shows the Brightness the console last reported (`[LED] brightness=<n>`)
+    as round(n * 100 / 255) %, and the page's own "board reports" text starts with that n. With
+    `expect_brightness` (the boot's 128 after a reset) the console's own value must be that too."""
+    last = None
+    for _, _, text in lines:
+        led = parse_led(text)
+        if led:
+            last = led[0]
+    if last is None:
+        return False, "no [LED] brightness= marker on the console, the board's Brightness is unknown"
+    if expect_brightness is not None and last != expect_brightness:
+        return False, f"console brightness={last}, expected {expect_brightness}: the board was not in the state the scenario assumes"
+    want = int(last * 100 / 255 + 0.5)
+    detail = f"console brightness={last}, slider {slider_pct} % (want {want} %), page text '{board_text}'"
+    ok = slider_pct == want and board_text.split(" ")[0] == str(last)
+    return ok, detail
+
+
+def is_ble_disconnected(text):
+    """`[BLE] disconnected reason=<r>` marker (any reason)."""
+    return _is_ble_disconnected(text)
+
+
+def is_ble_link_lost(text):
+    """`[BLE] disconnected reason=<r>` with r other than 0x13 (the Central asked): the link was lost."""
+    m = BLE_DISCONNECTED_RE.match(text)
+    return bool(m) and int(m.group(1), 0) != 0x13
+
+
+WEB_UPDATE_WINDOWS = 3       # windows tried when the page's display was late but the board's spacing was exact
+WEB_UPTIME_TOL_MS = 50       # the board's uptime_ms step is exactly 1000 ms; allow rounding
+_UPTIME_TEXT_RE = re.compile(r"^(\d+):(\d\d):(\d\d)\.(\d{3})$")
+
+
+def _uptime_ms(text):
+    m = _UPTIME_TEXT_RE.match(text)
+    if not m:
+        return None
+    h, mi, s, ms = (int(g) for g in m.groups())
+    return ((h * 60 + mi) * 60 + s) * 1000 + ms
+
+
+def check_hb_updates_retried(hb, start_ms, observed_until_ms, window_s=WEB_UPDATE_WINDOW_S,
+                             windows=WEB_UPDATE_WINDOWS):
+    """check_hb_updates over up to `windows` consecutive windows, the first that passes wins. A later
+    window is credited (reported as link jitter) only if the board's own spacing, read from the uptime
+    the page displays, is 1000 ms per seq step throughout: the board kept its period, the link was late.
+    `hb` is the page's display log [(wall_ms, seq, 'h:mm:ss.mmm'), ...]."""
+    changes = [(ms, seq) for ms, seq, _ in hb]
+    seen = []
+    for k in range(windows):
+        start = start_ms + k * window_s * 1000
+        if start + window_s * 1000 > observed_until_ms:
+            seen.append(f"window {k + 1} not observed")
+            break
+        ok, detail = check_hb_updates(changes, start, window_s, observed_until_ms=observed_until_ms)
+        if ok and k == 0:
+            return True, f"window 1: {detail}"
+        if ok:
+            bad = board_spacing_error(hb)
+            if bad:
+                return False, f"window {k + 1} passed but the board's uptime is not exact: {bad}"
+            return True, f"window {k + 1} (link jitter in window(s) before: {'; '.join(seen)}): {detail}"
+        seen.append(f"window {k + 1}: {detail}")
+    return False, "; ".join(seen)
+
+
+def board_spacing_error(hb, tol_ms=WEB_UPTIME_TOL_MS):
+    """None when every pair of displayed Heartbeats is 1000 ms of board uptime per seq step, else a description."""
+    for (_, a, ta), (_, b, tb) in zip(hb, hb[1:]):
+        ua, ub = _uptime_ms(ta), _uptime_ms(tb)
+        if ua is None or ub is None:
+            return f"unreadable uptime '{ta}' / '{tb}'"
+        if abs((ub - ua) - 1000 * (b - a)) > tol_ms:
+            return f"seq {a}->{b} uptime {ta}->{tb}"
+    return None

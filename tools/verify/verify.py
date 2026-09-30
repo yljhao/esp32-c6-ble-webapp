@@ -13,6 +13,13 @@ one final `RESULT: PASS|FAIL (n/m checks)` line; exit 0 only on PASS.
                                 debug image, types `debug stall` (the Heartbeat sender thread stops as a stalled
                                 bt_nus_send() would) and expects 20 s and more without a reset, `[HB] seq=N` still
                                 printed and the stale Heartbeats dropped; then restores the production image like --bite
+    ./verify.sh --web           Web App scenario (separate mode, not part of the default run; ticket 11): build, guard,
+                                identify, [--flash], reset + boot Checks, then real Google Chrome (flag
+                                --enable-experimental-web-platform-features, throwaway profile) drives webapp/ served on
+                                localhost, answers the device chooser through CDP DeviceAccess, and is cross-checked against
+                                the serial console (tools/webtest/board_web.py). [--web-dir DIR] serves another directory,
+                                [--web-url URL] tests a served page (e.g. the Pages URL) instead. No bleak Central runs in
+                                this mode: Chrome and the Harness Central never hold the PC's adapter together
     ./verify.sh --bite          watchdog bite scenario (separate mode, not part of the default run): builds the
                                 debug image (debug.conf, build dir build-debug), flashes it, types `debug hang`, expects
                                 a reset within ~5 s and `[BOOT] reason=watchdog`; then ALWAYS rebuilds and re-flashes
@@ -57,6 +64,7 @@ import argparse
 import asyncio
 import datetime
 import fcntl
+import json
 import os
 import re
 import subprocess
@@ -104,6 +112,9 @@ STALL_CAPTURE_S = 32.0       # `debug stall` typed at the start; the stall marke
 STALL_MIN_S = 25.0           # no reset for this long after the stall marker (the watchdog window is 5 s)
 REBOOT_WINDOW_S = 5.0        # a refused `kernel reboot` must show no [BOOT] in this window (ticket 08)
 SERIAL_REBOOT_S = 20.0       # `kernel reboot` on the serial shell: the [BOOT] marker follows within this
+WEB_ATTEMPTS = 4             # Chrome scenario runs when the PC's radio drops the Connection (see run_web)
+WEB_RETRY_PAUSE_S = 5.0      # the board advertises again within a second; give BlueZ a moment
+WEB_SCENARIO_S = WEB_ATTEMPTS * (120.0 + WEB_RETRY_PAUSE_S)       # bound on the whole Chrome scenario (connect up to 3 x 20 s is the worst case)
 BLE_LOG_TAIL_S = 1.0         # keep capturing this long after the last step
 LOCK_WAIT_S = 5.0
 # Bounds on the build.sh calls (the Harness never waits for ever while it holds the lock):
@@ -155,6 +166,14 @@ A_HB_AFTER = "Heartbeat: consecutive again after the reconnect"
 A_HB_MARKERS = "console: `[HB] seq=N` on every tenth Heartbeat, the same numbers as on the Shell link"
 A_HB_REBOOT = "Heartbeat: after `kernel reboot` on the serial shell the first seq is near 0"
 A_HB_STALL = "debug image: a stalled Heartbeat sender leaves the main loop feeding (no reset, [HB] markers go on, stale lines dropped)"
+A_WEB_CHOOSER = "Web App: Chrome answers the chooser through CDP DeviceAccess (selects XIAO-C6-LED, no human)"
+A_WEB_CONNECTED = "Web App: the page shows connected (navigator.bluetooth present with the experimental flag)"
+A_WEB_SLIDER_SYNC = "Web App: the slider shows the Brightness the console last reported after `led get` (50 % at the boot Brightness 128)"
+A_WEB_HB_UPDATES = "Web App: the displayed Heartbeat seq updates at least twice within 3 s"
+A_WEB_HB_CONSOLE = "Web App: the displayed Heartbeat seq matches the console's [HB] markers (same numbers, same time)"
+A_WEB_UPTIME = "Web App: the displayed Heartbeat uptime is shown"
+A_WEB_DISCONNECT = "Web App: Disconnect shows disconnected, console [BLE] disconnected reason=0x13 then advertising again"
+A_WEB_CLEAN = "Web App: the page raised no error (page error, console error, failed request)"
 A_NOHANG = "production build carries no hang command"
 A_SOAK = "idle: no reset (no spurious watchdog bite)"
 A_BITE = "debug image: hang command leads to a reset within ~5 s, next boot reason=watchdog"
@@ -229,6 +248,7 @@ class Harness:
         self.build_dir = BUILD_DIR
         self.build_env = {}
         self.capture_elapsed = 0.0   # measured length of the last capture
+        self.web_attempts = []       # per Chrome scenario run: link held or lost (--web)
 
     def check(self, name, ok, detail=""):
         self.results.append((name, bool(ok), detail))
@@ -327,6 +347,115 @@ class Harness:
         self.check(A_WDT, *checks.check_wdt_armed(self.lines))
         self.check(A_BLE_ADV, *checks.check_ble_advertising(self.lines))
         self.check(A_ORDER, *checks.check_marker_order(self.lines))
+
+    # -- the Web App in Chrome (ticket 11; glue in tools/webtest/board_web.py, decisions in checks.py) --
+    def run_web(self):
+        """Chrome drives the Web App against the board; the console is recorded meanwhile."""
+        sys.path.insert(0, os.path.join(ROOT, "tools", "webtest"))
+        import board_web
+        import run as web_run
+
+        os.makedirs(os.path.join(BUILD_DIR, "verify"), exist_ok=True)
+        stamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+        self.log_path = os.path.join(BUILD_DIR, "verify", f"web-{stamp}.log")
+        cap = BackgroundCapture(self.args.port, self.log_path, WEB_SCENARIO_S + 30.0)
+        try:
+            cap.start()
+        except OSError as e:
+            return self.check("console capture (Web App scenario)", False, str(e))
+        httpd = None
+        obs = None
+        try:
+            url = self.args.web_url
+            if not url:
+                httpd = web_run.serve(os.path.abspath(self.args.web_dir))
+                url = f"http://localhost:{httpd.server_address[1]}/index.html"
+            print(f"web: {url}", flush=True)
+            # The PC's radio can drop a Connection by supervision timeout (reason 0x08, board-notes: radio
+            # episodes), which says nothing about the page or the firmware. A run in which the console shows
+            # such a drop is repeated, at most WEB_ATTEMPTS times, and says so; a drop in the last run fails it.
+            for attempt in range(1, WEB_ATTEMPTS + 1):
+                mark = cap.mark()
+                obs = board_web.drive(url, cap, log=lambda m: print(m, flush=True))
+                drops = [text for _, _, text in cap.since(mark) if checks.is_ble_link_lost(text)]
+                obs["link_drops"] = drops
+                self.web_attempts.append(f"attempt {attempt}: " + (f"link lost {drops}" if drops else "link held"))
+                if not drops or attempt == WEB_ATTEMPTS:
+                    break
+                print(f"web: attempt {attempt}: the Connection was lost by the PC's radio ({drops}); repeating", flush=True)
+                time.sleep(WEB_RETRY_PAUSE_S)
+        except Exception as e:
+            self.check("Web App scenario runs", False, f"{type(e).__name__}: {e}")
+        finally:
+            if httpd:
+                httpd.shutdown()
+                httpd.server_close()
+            try:
+                cap.stop(BLE_LOG_TAIL_S)
+            except OSError as e:
+                self.check("console capture (Web App scenario)", False, str(e))
+        print(f"captured {len(cap.lines)} lines -> {self.log_path}", flush=True)
+        if obs is not None:
+            json_path = self.log_path[:-len(".log")] + ".json"
+            with open(json_path, "w") as f:      # what the page did and showed, next to the console log
+                json.dump(obs, f, indent=1, default=str)
+            print(f"page observation -> {json_path}", flush=True)
+            self.web_checks(obs, cap)
+
+    def web_checks(self, obs, cap):
+        chooser = obs.get("chooser") or {}
+        ok = bool(chooser.get("selected")) and not obs.get("select_error")
+        detail = (f"listed {chooser.get('listed')}, first prompt {chooser.get('first_prompt_after_click_s')} s and "
+                  f"selected {chooser.get('selected_after_click_s')} s after the click" if chooser.get("selected") else
+                  f"listed {chooser.get('listed')}, nothing to select ({chooser.get('events')} prompt event(s))"
+                  if chooser.get("events") else "no deviceRequestPrompted event")
+        if obs.get("select_error"):
+            detail += f"; selectPrompt failed: {obs['select_error']}"
+        self.check(A_WEB_CHOOSER, ok, detail)
+        connected = obs.get("t_connected") is not None
+        attempts = "; ".join(f"attempt {i}: {a['state']} {a['message']}".strip() for i, a in enumerate(obs["attempts"], 1))
+        runs = "; ".join(self.web_attempts)
+        self.check(A_WEB_CONNECTED, connected and bool(obs.get("bluetooth")),
+                   f"connected {chooser.get('connected_after_click_s')} s after the click in {len(obs['attempts'])} attempt(s); {runs}"
+                   if connected else f"{obs.get('error')}; navigator.bluetooth={obs.get('bluetooth')}; {attempts}; {runs}")
+        if not connected:
+            return self.web_finish_checks(obs)
+        if "slider_pct" not in obs:
+            self.check(A_WEB_SLIDER_SYNC, False, f"the scenario stopped before the slider was read: {obs['error']}")
+            return self.web_finish_checks(obs)
+        # A run that follows a lost Connection may find the board at another Brightness (the aborted run's
+        # last step), so only the first run is held to the boot's 128.
+        first_run = len(self.web_attempts) == 1
+        self.check(A_WEB_SLIDER_SYNC, *checks.check_slider_shows_board(
+            obs["slider_pct"], obs["board_text"], self.lines + obs["console_before_steps"],
+            expect_brightness=128 if first_run else None))
+        for step in obs["steps"]:
+            ok, detail = checks.check_led_applied(step["lines"], step["want"])
+            markers = [text for _, _, text in step["lines"] if checks.parse_led(text)]
+            if ok and len(markers) != 1:
+                ok, detail = False, f"{len(markers)} [LED] markers for one slider move: {markers}"
+            if ok and not step["echo"].startswith(f"{step['want']} "):
+                ok, detail = False, f"{detail}, but the page reports '{step['echo']}'"
+            self.check(f"Web App: slider {step['pct']} % prints [LED] brightness={step['want']} on the console",
+                       ok, f"{detail}; page shows {step['slider_value']!r}, reports '{step['echo']}' (checked {step['echo_s']} s after the move)")
+        if "hb_observed_until_ms" not in obs or "disconnect_lines" not in obs:
+            self.check("Web App scenario runs to its end", False, str(obs["error"]))
+            return self.web_finish_checks(obs)
+        hb = [(ms, seq) for ms, seq, _ in obs["hb"]]
+        self.check(A_WEB_HB_UPDATES, *checks.check_hb_updates_retried(
+            obs["hb"], obs["hb_window_start_ms"], obs["hb_observed_until_ms"]))
+        self.check(A_WEB_HB_CONSOLE, *checks.check_page_matches_console(hb, cap.lines))
+        self.check(A_WEB_UPTIME, re.fullmatch(r"\d+:\d\d:\d\d\.\d{3}", obs.get("uptime_text", "")) is not None,
+                   f"page shows {obs.get('uptime_text')!r}, last Heartbeat display {obs['hb'][-1] if obs['hb'] else None}")
+        disc_ok, disc_detail = checks.check_ble_disconnected(obs["disconnect_lines"], BLE_REMOTE_TERMINATED)
+        page_ok = obs.get("status_after_disconnect") == "disconnected"
+        self.check(A_WEB_DISCONNECT, disc_ok and page_ok,
+                   f"{disc_detail}; page status {obs.get('status_after_disconnect')!r}, seq still {obs.get('seq_after_disconnect')!r}")
+        self.web_finish_checks(obs)
+
+    def web_finish_checks(self, obs):
+        self.check(A_WEB_CLEAN, not obs["page_errors"] and not obs["error"],
+                   "; ".join(obs["page_errors"] + ([obs["error"]] if obs["error"] else [])) or "no page error")
 
     def check_production_has_no_hang(self):
         """Static half of "the production image has no hang command": its .config and image."""
@@ -910,6 +1039,9 @@ class Harness:
             return self.finish()
         self.capture_checks()
         self.check_production_has_no_hang()
+        if self.args.web:
+            self.run_web()
+            return self.finish()
         self.run_ble()
         self.run_heartbeat()
         self.run_shell_link()
@@ -945,7 +1077,16 @@ def main():
                     help="watchdog bite scenario on the debug image; restores the production image afterwards")
     ap.add_argument("--stall", action="store_true",
                     help="Heartbeat stall scenario on the debug image; restores the production image afterwards")
+    ap.add_argument("--web", action="store_true",
+                    help="Web App scenario: real Chrome drives the page against the board (no bleak Central)")
+    ap.add_argument("--web-dir", default=os.path.join(ROOT, "webapp"), metavar="DIR",
+                    help="with --web: the directory served on localhost (default webapp/)")
+    ap.add_argument("--web-url", metavar="URL", help="with --web: test this served page instead of a local server")
     args = ap.parse_args()
+    if (args.web_url or args.web_dir != os.path.join(ROOT, "webapp")) and not args.web:
+        ap.error("--web-dir and --web-url belong to --web")
+    if args.web and (args.bite or args.stall or args.soak or args.replay):
+        ap.error("--web is a mode of its own (no --bite, --stall, --soak, --replay)")
     if (args.bite or args.stall) and (args.replay or args.soak):
         ap.error("--bite and --stall are modes of their own (no --replay, no --soak)")
     if args.bite and args.stall:
