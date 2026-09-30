@@ -8,7 +8,7 @@ Spec: `.scratch/ble-webapp/spec.md` (user story 21, Web App).
 
 **Board:** required
 
-**Status:** ready-for-agent
+**Status:** done
 
 - [x] Playwright + Harness: a board reboot (serial shell `kernel reboot`) makes the page show disconnected within 5 s with the last `seq` still shown.
 - [x] The reconnect button reconnects with no chooser prompt, the slider shows 50 % (Brightness 128 after reboot) and Heartbeats resume from a small `seq`.
