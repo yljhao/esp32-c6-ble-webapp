@@ -60,6 +60,6 @@ Linux 上的 Chrome 預設沒有 `navigator.bluetooth`，需要其中一種做�
 
 ## 在 iPhone 的 Bluefy 開啟
 
-Web Bluetooth 要求 HTTPS，所以把 Pages 網址 <https://yljhao.github.io/esp32-c6-ble-webapp/> 貼到 iOS 上 Bluefy 的網址列即可，不需要設定旗標。板子要在 production 狀態（`./verify.sh --flash` 結尾 `RESULT: PASS`）。
+Web Bluetooth 要求安全來源（HTTPS），Pages 網址就是為此而發佈的：把 <https://yljhao.github.io/esp32-c6-ble-webapp/> 貼到 iOS 上 Bluefy 的網址列開啟（Bluefy 是否需要額外設定，尚未驗證）。板子要在 production 狀態（`./verify.sh --flash` 結尾 `RESULT: PASS`）。
 
 Bluefy 的實機驗收由使用者親自做（ticket 14：連線、拖曳滑桿看 LED 亮暗、Heartbeat 更新、關閉再開啟後重新連線），目前尚未執行，所以這份 README 對 Bluefy 上的行為不作任何保證。
