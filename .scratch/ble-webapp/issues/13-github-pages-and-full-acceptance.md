@@ -8,7 +8,7 @@ Spec: `.scratch/ble-webapp/spec.md` (Web App, Further Notes). Outward-facing: cr
 
 **Board:** required
 
-**Status:** ready-for-agent
+**Status:** done
 
 - [x] Authorized by the user 2026-09-30 (no further question needed): create the public repository, push, enable Pages. First check that nothing secret or machine-specific that should not be public is committed (tokens, keys, `prj.local.conf`-style files, the venv, build output); if anything is doubtful, park this ticket as `needs-info` instead of publishing.
 - [x] The Pages URL serves the Web App over HTTPS; the workflow run is green.
