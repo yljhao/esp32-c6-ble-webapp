@@ -8,7 +8,7 @@ Spec: `.scratch/ble-webapp/spec.md` (Web App, Web App automation, Testing Decisi
 
 **Board:** none
 
-**Status:** ready-for-agent
+**Status:** done
 
 - [x] `playwright` installed in the project venv and recorded in its requirements; no `playwright install` browser download.
 - [x] Tests cover 0/50/100 % ↔ 0/128/255 both ways, reassembly across split chunks, and classification (Heartbeat, `LED`, `ERR`, noise), run headless in Chrome by one host test command.
