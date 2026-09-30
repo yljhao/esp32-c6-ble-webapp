@@ -4,19 +4,19 @@
 
 | # | Title | Result | Commits (implementation) | Close commit |
 |---|-------|--------|--------------------------|--------------|
-| 01 | Toolchain and target loop | done | 663249d, dfb31e5, 2c56ae1 | e3dec44 |
-| 02 | Harness skeleton | done | f277de7 | b2b6253 |
-| 03 | Self-test and Duty readback | done | 01dc948, cf8f576 | 8c9e92f |
-| 04 | Watchdog | done | f2eb015, 6b5d6bf, d7a3983 | 9ec97ec |
-| 05 | Harness BLE Central Checks | done | 0a50ed2, eef40ed | a7d88cc |
-| 06 | Advertising and one Connection | done | e025d57 | 2558f65 |
-| 07 | Shell link `led set` / `led get` | done | 1d5e152 | 176b89f |
-| 08 | Shell link command restriction | done | f550489 | e8caa9f |
-| 09 | Heartbeat | done | 95a6666 | 48fce6d |
-| 10 | Web App logic and Playwright runner | done | 7e5c30d | 258fbff |
-| 11 | Web App connect / control / Heartbeat | done | 828f041 | 508a396 |
-| 12 | Web App disconnect and reconnect | done | 4677f04 | 8b77712 |
-| 13 | GitHub repo, Pages, full acceptance | done | 0425a77, a685b13, 65a3ca0 | 58e84b5 |
+| 01 | Toolchain and target loop | done | 0a2070a, 824f761, a76a218 | 6d5a695 |
+| 02 | Harness skeleton | done | 8bc6f42 | 1528fc8 |
+| 03 | Self-test and Duty readback | done | eff8a4c, 6076f2e | 9585b03 |
+| 04 | Watchdog | done | 244d12b, 7005e07, ff6f814 | 889e2c1 |
+| 05 | Harness BLE Central Checks | done | 1036c99, 2c94fa2 | 3c04d0a |
+| 06 | Advertising and one Connection | done | 046f4e8 | ad78150 |
+| 07 | Shell link `led set` / `led get` | done | 144759a | 7142e14 |
+| 08 | Shell link command restriction | done | fc9dc51 | cada31a |
+| 09 | Heartbeat | done | 9d17e20 | 3ab9ffa |
+| 10 | Web App logic and Playwright runner | done | b03d870 | 1df4f4a |
+| 11 | Web App connect / control / Heartbeat | done | c29ac51 | e33cd32 |
+| 12 | Web App disconnect and reconnect | done | 6a20bfa | 21ef457 |
+| 13 | GitHub repo, Pages, full acceptance | done | e4f3a52, 748f62f, 6570e79 | e4399af |
 | 14 | Bluefy acceptance on the iPhone | not started (human) | none | none |
 
 Parked (`needs-info`): none. No ticket needed the Opus/Fable escalation.
@@ -56,3 +56,6 @@ Parked (`needs-info`): none. No ticket needed the Opus/Fable escalation.
 ## After the run: history rewrite (2026-09-30)
 
 At the user's request the Bluetooth adapter MAC of the PC and the board's MAC were redacted (`<hci0-mac-redacted>`, `<board-mac-redacted>`) from the whole history of the public repository, and `main` was force-pushed. Every commit hash therefore changed; the hashes in this report and in tickets 02 to 05 were remapped to the new ones. Commit hashes elsewhere in the tickets' `## Comments` or board-notes evidence log are not a concern: none of them referred to this repository's commits except the ones remapped here. The `esptool-build` commit `d7b0966` belongs to the other repository and is unchanged.
+
+A second rewrite, also at the user's request, replaced the local home directory path everywhere in the whole history with `~` in documents and with `$HOME` in the shell scripts (`build.sh`, `tools/esptool-guard.sh`, `tools/test_esptool_guard.sh`), then force-pushed; hashes were remapped again. Ticket 14 was reported done by the user after this run's Bluefy check (see the ticket's `## Comments`), so the "human checks waiting" list above is finished except for the optional LED-sweep look in item 1.
+
