@@ -4,19 +4,19 @@
 
 | # | Title | Result | Commits (implementation) | Close commit |
 |---|-------|--------|--------------------------|--------------|
-| 01 | Toolchain and target loop | done | 6263160, 72a2faa, ac3a751 | dd29e71 |
-| 02 | Harness skeleton | done | da4c0f4 | 4c23bb5 |
-| 03 | Self-test and Duty readback | done | 66f1c4b, f776f45 | 5508655 |
-| 04 | Watchdog | done | 08b0853, e35ab97, ef701e9 | 94ead5f |
-| 05 | Harness BLE Central Checks | done | 7f59e7f, 5da6efa | fe187d8 |
-| 06 | Advertising and one Connection | done | 9d21d64 | d9f427b |
-| 07 | Shell link `led set` / `led get` | done | 23638cc | bc526c7 |
-| 08 | Shell link command restriction | done | 9b8c6fc | 75d3df5 |
-| 09 | Heartbeat | done | d0dd317 | 2e29500 |
-| 10 | Web App logic and Playwright runner | done | a99588b | b8e6871 |
-| 11 | Web App connect / control / Heartbeat | done | e3692eb | fad6b25 |
-| 12 | Web App disconnect and reconnect | done | 82399bb | 0735ec2 |
-| 13 | GitHub repo, Pages, full acceptance | done | 1831a84, c5e7562, 3079075 | e67366c |
+| 01 | Toolchain and target loop | done | 663249d, dfb31e5, 2c56ae1 | e3dec44 |
+| 02 | Harness skeleton | done | f277de7 | b2b6253 |
+| 03 | Self-test and Duty readback | done | 01dc948, cf8f576 | 8c9e92f |
+| 04 | Watchdog | done | f2eb015, 6b5d6bf, d7a3983 | 9ec97ec |
+| 05 | Harness BLE Central Checks | done | 0a50ed2, eef40ed | a7d88cc |
+| 06 | Advertising and one Connection | done | e025d57 | 2558f65 |
+| 07 | Shell link `led set` / `led get` | done | 1d5e152 | 176b89f |
+| 08 | Shell link command restriction | done | f550489 | e8caa9f |
+| 09 | Heartbeat | done | 95a6666 | 48fce6d |
+| 10 | Web App logic and Playwright runner | done | 7e5c30d | 258fbff |
+| 11 | Web App connect / control / Heartbeat | done | 828f041 | 508a396 |
+| 12 | Web App disconnect and reconnect | done | 4677f04 | 8b77712 |
+| 13 | GitHub repo, Pages, full acceptance | done | 0425a77, a685b13, 65a3ca0 | 58e84b5 |
 | 14 | Bluefy acceptance on the iPhone | not started (human) | none | none |
 
 Parked (`needs-info`): none. No ticket needed the Opus/Fable escalation.
@@ -52,3 +52,7 @@ Parked (`needs-info`): none. No ticket needed the Opus/Fable escalation.
    - The Heartbeat `seq` on the page increases about once a second.
    - After closing and reopening Bluefy (or turning Bluetooth off and on), Reconnect shows the Brightness kept.
    - Any Bluefy-specific behaviour (reconnect without chooser, MTU, pairing prompt) is written into `docs/agents/board-notes.md`.
+
+## After the run: history rewrite (2026-09-30)
+
+At the user's request the Bluetooth adapter MAC of the PC and the board's MAC were redacted (`<hci0-mac-redacted>`, `<board-mac-redacted>`) from the whole history of the public repository, and `main` was force-pushed. Every commit hash therefore changed; the hashes in this report and in tickets 02 to 05 were remapped to the new ones. Commit hashes elsewhere in the tickets' `## Comments` or board-notes evidence log are not a concern: none of them referred to this repository's commits except the ones remapped here. The `esptool-build` commit `d7b0966` belongs to the other repository and is unchanged.
