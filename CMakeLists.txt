@@ -17,6 +17,8 @@ target_sources(app PRIVATE
   src/selftest.c
   src/brightness.c
   src/watchdog.c
+  src/heartbeat.c
+  src/heartbeat_link.c
   src/ble.c
   src/led_command.c
   src/led_shell.c

@@ -2,8 +2,8 @@
 /*
  * Boot order (spec): Reset reason marker -> Self-test (a failure is
  * reported, not retried, the boot continues) -> Brightness 128 -> watchdog
- * armed -> Shell link started -> Bluetooth enabled and advertising. A later ticket adds the
- * main loop's Heartbeats.
+ * armed -> Shell link started -> Bluetooth enabled and advertising. The main loop then feeds the
+ * watchdog and emits the Heartbeats.
  */
 
 #include <zephyr/kernel.h>
@@ -12,6 +12,8 @@
 #include "ble.h"
 #include "brightness.h"
 #include "debug_hang.h"
+#include "heartbeat.h"
+#include "heartbeat_link.h"
 #include "reset_reason.h"
 #include "selftest.h"
 #include "shell_nus.h"
@@ -54,12 +56,20 @@ int main(void)
 	 */
 	(void)ble_start();
 
-	/* The main loop is the only feeder (spec). It feeds once per 1 s period against
-	 * the 5 s window; the Harness expects a bite 4 to 5 s after the hang, so anything a
-	 * later ticket adds to this loop must keep one pass well under the window.
+	/* The main loop is the only feeder (spec) and the one that emits Heartbeats. It sleeps until
+	 * the next Heartbeat is due, never longer than one period (1 s) against the 5 s window; the
+	 * Harness expects a bite 4 to 5 s after the hang, so nothing here may wait for anything
+	 * else: the Heartbeat line is only queued for the sender thread (heartbeat_link.c), which is
+	 * the one that can block on a stalled link.
 	 */
+	struct heartbeat hb;
+	uint32_t dropped_total = 0;
+
+	heartbeat_boot(&hb, (uint64_t)k_uptime_get());
 	while (1) {
-		k_msleep(1000);
+		uint64_t now = (uint64_t)k_uptime_get();
+		uint32_t seq;
+
 		if (debug_hang_requested()) {
 			/* Debug image only: stop feeding for good; the watchdog must reset the board.
 			 * Leading newline: the shell prompt may be on the line.
@@ -67,7 +77,27 @@ int main(void)
 			printk("\n[DBG] hang: main loop stops feeding\n");
 			k_sleep(K_FOREVER);
 		}
+		/* seq counts from boot whether or not a Central listens; the sender drops the line
+		 * when nobody is subscribed.
+		 */
+		if (heartbeat_due(&hb, now, &seq)) {
+			int dropped = heartbeat_link_post(seq);
+
+			if (dropped > 0) {
+				dropped_total += (uint32_t)dropped;
+				/* a stalled link drops one a second: report the 1st, 2nd, 4th, 8th ... */
+				if ((dropped_total & (dropped_total - 1U)) == 0U) {
+					printk("\n[HB] link stalled: %u stale heartbeat(s) dropped\n",
+					       dropped_total);
+				}
+			}
+			if (heartbeat_marker_due(seq)) {
+				printk("\n[HB] seq=%u\n", seq);
+			}
+		}
 		watchdog_feed();
+		k_msleep(MAX(1U, MIN(heartbeat_wait_ms(&hb, (uint64_t)k_uptime_get()),
+				     HEARTBEAT_PERIOD_MS)));
 	}
 	return 0;
 }

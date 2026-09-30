@@ -113,6 +113,51 @@ ZTEST(duty_readback, test_40_period_waveform_at_brightness_128)
 	zassert_equal(r.freq_hz, 20000, "freq %u", r.freq_hz);
 }
 
+ZTEST(duty_readback, test_window_that_ends_mid_period_still_reads_the_true_duty)
+{
+	/*
+	 * The board's 2 ms window holds a fractional number of 20 kHz periods (~40.3 of 34 samples), so
+	 * the partial periods at both ends skew a plain count by up to a period in 40 (ticket 09: the
+	 * marker read 51.3 % for a 50.2 % output). The duty is judged over whole periods only.
+	 */
+	enum { PERIOD = 34, LOW = 17, COUNT = 1373, OFFSET = 30 };
+	static uint8_t levels[COUNT];
+	struct duty_readback r;
+
+	for (size_t i = 0; i < COUNT; i++) {
+		levels[i] = ((i + OFFSET) % PERIOD) < LOW ? 0 : 1;
+	}
+	duty_readback_compute(levels, COUNT, 320000, 160000000, &r);
+	zassert_equal(r.samples, COUNT, "samples %u", r.samples);
+	zassert_equal(r.low_permille, 500, "permille %u", r.low_permille);
+}
+
+ZTEST(duty_readback, test_every_window_phase_reads_the_true_duty)
+{
+	/* Same waveform, window start moved through a whole period: always exactly 500 permille. */
+	enum { PERIOD = 34, LOW = 17, COUNT = 1373 };
+	static uint8_t levels[COUNT];
+	struct duty_readback r;
+
+	for (size_t offset = 0; offset < PERIOD; offset++) {
+		for (size_t i = 0; i < COUNT; i++) {
+			levels[i] = ((i + offset) % PERIOD) < LOW ? 0 : 1;
+		}
+		duty_readback_compute(levels, COUNT, 320000, 160000000, &r);
+		zassert_equal(r.low_permille, 500, "offset %u: permille %u", (unsigned int)offset,
+			      r.low_permille);
+	}
+}
+
+ZTEST(duty_readback, test_window_with_less_than_one_period_falls_back_to_the_plain_count)
+{
+	uint8_t levels[6] = {1, 1, 0, 0, 0, 1}; /* one falling and one rising edge: no whole period */
+	struct duty_readback r;
+
+	duty_readback_compute(levels, sizeof(levels), 6, CYCLES_PER_SEC, &r);
+	zassert_equal(r.low_permille, 500, "permille %u", r.low_permille);
+}
+
 ZTEST(duty_readback, test_permille_rounds_to_nearest)
 {
 	uint8_t one_of_three[3] = {0, 1, 1};

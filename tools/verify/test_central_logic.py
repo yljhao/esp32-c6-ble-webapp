@@ -470,6 +470,112 @@ class CleanStream(unittest.TestCase):
         self.assertIn("nothing", detail)
 
 
+def _hb(seq, up=None):
+    return cl.classify_line('{"seq":%d,"uptime_ms":%d}' % (seq, seq * 1000 + 3000 if up is None else up))
+
+
+class InterleavedStream(unittest.TestCase):
+    """Ticket 09: Heartbeats and command replies arrive as whole lines, in any order."""
+
+    def test_replies_between_heartbeats_pass(self):
+        lines = [_hb(1), cl.classify_line("LED 128"), _hb(2), cl.classify_line("LED 128"), _hb(3),
+                 cl.classify_line("LED 5"), _hb(4)]
+        ok, detail = cl.check_interleaved(lines, [128, 128, 5], min_between=3)
+        self.assertTrue(ok, detail)
+
+    def test_a_spliced_line_fails(self):
+        lines = [_hb(1), cl.classify_line('LED 12{"seq":2,"uptime_ms":5}'), cl.classify_line("8")]
+        ok, detail = cl.check_interleaved(lines, [128], min_between=0)
+        self.assertFalse(ok)
+        self.assertIn("neither Heartbeat nor reply", detail)
+
+    def test_a_wrong_or_missing_reply_fails(self):
+        lines = [_hb(1), cl.classify_line("LED 128"), _hb(2)]
+        self.assertFalse(cl.check_interleaved(lines, [128, 128], min_between=0)[0])
+        self.assertFalse(cl.check_interleaved(lines, [7], min_between=0)[0])
+
+    def test_replies_all_before_the_first_heartbeat_show_no_interleaving(self):
+        lines = [cl.classify_line("LED 128"), cl.classify_line("LED 128"), _hb(1), _hb(2)]
+        ok, detail = cl.check_interleaved(lines, [128, 128], min_between=1)
+        self.assertFalse(ok)
+        self.assertIn("between Heartbeats", detail)
+
+
+class GapAfterDisconnect(unittest.TestCase):
+    def s(self, t, seq):
+        return cl.Sample(t, seq, seq * 1000 + 3000)
+
+    def test_five_second_disconnect_plus_reconnect_time_passes(self):
+        ok, detail = cl.check_gap_after_disconnect(self.s(100.0, 40), self.s(107.6, 48))
+        self.assertTrue(ok, detail)
+
+    def test_seq_not_advanced_by_the_disconnect_fails(self):
+        ok, _ = cl.check_gap_after_disconnect(self.s(100.0, 40), self.s(107.6, 41))
+        self.assertFalse(ok)
+
+    def test_consecutive_seq_after_disconnect_fails(self):
+        ok, detail = cl.check_gap_after_disconnect(self.s(100.0, 40), self.s(101.0, 41))
+        self.assertFalse(ok)
+        self.assertIn("expected a gap", detail)
+
+    def test_seq_that_ran_ahead_of_the_pc_clock_fails(self):
+        ok, detail = cl.check_gap_after_disconnect(self.s(100.0, 40), self.s(106.0, 49))
+        self.assertFalse(ok)
+        self.assertIn("PC time", detail)
+
+    def test_a_huge_gap_fails(self):
+        ok, _ = cl.check_gap_after_disconnect(self.s(100.0, 40), self.s(120.0, 60))
+        self.assertFalse(ok)
+
+
+class RestartAfterReboot(unittest.TestCase):
+    def test_seq_back_near_zero_passes(self):
+        ok, detail = cl.check_restart_after_reboot(cl.Sample(10.0, 90, 93000), cl.Sample(20.0, 3, 6000))
+        self.assertTrue(ok, detail)
+
+    def test_no_restart_fails(self):
+        ok, _ = cl.check_restart_after_reboot(cl.Sample(10.0, 90, 93000), cl.Sample(20.0, 100, 103000))
+        self.assertFalse(ok)
+
+    def test_restart_far_from_zero_fails(self):
+        ok, detail = cl.check_restart_after_reboot(cl.Sample(10.0, 90, 93000), cl.Sample(20.0, 40, 43000))
+        self.assertFalse(ok)
+        self.assertIn("near 0", detail)
+
+
+class BoardSpacing(unittest.TestCase):
+    """The board's own period, read from uptime_ms, apart from when the PC saw the lines."""
+
+    def hbs(self, ups, first_seq=5):
+        return [cl.Sample(100.0 + i, first_seq + i, up) for i, up in enumerate(ups)]
+
+    def test_exact_period_passes_even_when_arrivals_are_late(self):
+        samples = [cl.Sample(t, 5 + i, 10000 + 1000 * i) for i, t in enumerate([0, 1.3, 2.0, 3.3, 4.0, 5.0])]
+        ok, detail = cl.check_board_spacing(samples, 6)
+        self.assertTrue(ok, detail)
+        # ... which the PC-clock Check rejects, so the two Checks together tell link from firmware
+        self.assertFalse(cl.check_heartbeats(samples, 6)[0])
+
+    def test_a_board_period_off_by_more_than_200_ms_fails(self):
+        ok, detail = cl.check_board_spacing(self.hbs([1000, 2000, 3300, 4300]), 4)
+        self.assertFalse(ok)
+        self.assertIn("board period 1300", detail)
+
+    def test_a_gap_in_seq_fails(self):
+        samples = [cl.Sample(0, 1, 1000), cl.Sample(1, 3, 3000)]
+        self.assertFalse(cl.check_board_spacing(samples, 2)[0])
+
+    def test_too_few_samples_fail(self):
+        self.assertFalse(cl.check_board_spacing(self.hbs([1000, 2000]), 3)[0])
+
+    def test_a_stall_on_the_link_fails_when_a_limit_is_given(self):
+        samples = [cl.Sample(0.0, 1, 1000), cl.Sample(1.0, 2, 2000), cl.Sample(4.0, 3, 3000)]
+        self.assertTrue(cl.check_board_spacing(samples, 3)[0])
+        ok, detail = cl.check_board_spacing(samples, 3, max_arrival_s=2.5)
+        self.assertFalse(ok)
+        self.assertIn("limit 2.5", detail)
+
+
 class NoHardware(unittest.TestCase):
     def imported_modules(self, module):
         code = ("import sys; sys.path.insert(0, %r); import %s; "

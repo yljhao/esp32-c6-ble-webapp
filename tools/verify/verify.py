@@ -9,6 +9,10 @@ one final `RESULT: PASS|FAIL (n/m checks)` line; exit 0 only on PASS.
     ./verify.sh --seconds N     capture window after the reset (default 20 s; the boot's [WDT] armed marker ends the capture early)
     ./verify.sh --soak N        idle mode: after the boot keep capturing N s (default 60) and fail on any reset
                                 (no spurious watchdog bite); not part of the default run
+    ./verify.sh --stall         Heartbeat stall scenario (separate mode, not part of the default run): builds the
+                                debug image, types `debug stall` (the Heartbeat sender thread stops as a stalled
+                                bt_nus_send() would) and expects 20 s and more without a reset, `[HB] seq=N` still
+                                printed and the stale Heartbeats dropped; then restores the production image like --bite
     ./verify.sh --bite          watchdog bite scenario (separate mode, not part of the default run): builds the
                                 debug image (debug.conf, build dir build-debug), flashes it, types `debug hang`, expects
                                 a reset within ~5 s and `[BOOT] reason=watchdog`; then ALWAYS rebuilds and re-flashes
@@ -18,6 +22,8 @@ one final `RESULT: PASS|FAIL (n/m checks)` line; exit 0 only on PASS.
 The Harness holds the board lock (/tmp/<port>.lock) for the whole run and
 passes C6_BOARD_LOCK_HELD=1 to build.sh so its calls do not wait on it. The
 capture log is kept at <build dir>/verify/capture-<stamp>.log.
+
+The Central connect (`CentralConnection.open`) is repeated up to 3 times when BlueZ drops the link during it; each retry is printed.
 
 Checks so far (pure logic in checks.py, unit-tested by test_checks.py):
   build.sh build produces zephyr.bin; the esptool guard; chip_id 13 (identify);
@@ -41,6 +47,11 @@ Checks so far (pure logic in checks.py, unit-tested by test_checks.py):
   sequence, and a second command smuggled behind a `\\r`) each answer one such ERR line and reset nothing
   (ADR-0001: no kernel or device command on the link). Last of all, `kernel reboot` typed on the serial shell
   resets the board (`[BOOT] reason=software`).
+  Heartbeat (ticket 09), before the Shell link scenario: 10 s of Heartbeat lines with consecutive `seq` at
+  1 s +- 200 ms while `led get` / `led set 128` are sent all the while (every reply whole, none spliced with a
+  Heartbeat); a 5 s disconnect makes the first `seq` after it 5 or more higher, matching the PC clock; `[HB]
+  seq=N` on the console every tenth Heartbeat, the same numbers as on the link; after a `kernel reboot` typed on
+  the serial shell the first `seq` is near 0.
 """
 import argparse
 import asyncio
@@ -56,6 +67,7 @@ import time
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 sys.path.insert(0, os.path.join(ROOT, "tools", "board"))
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import central_logic  # noqa: E402
 import checks  # noqa: E402
 import console  # noqa: E402
 import reset as board_reset  # noqa: E402
@@ -79,6 +91,17 @@ BLE_SCENARIO_S = 120.0       # bound on the whole Central scenario
 SHELL_MARKER_WAIT_S = 3.0    # an applied Brightness prints its [LED] marker within this
 SHELL_SETTLE_S = 0.3         # after a rejected command, wait this long for a marker that must not come
 SHELL_SERIAL_S = 10.0        # bound on typing the `led` commands on the serial shell
+HB_MAX_ARRIVAL_S = 3.0       # a retried window may not hold a Heartbeat later than this after its predecessor
+HB_ATTEMPTS = 3              # windows tried when only the PC-clock arrival spacing fails (radio link jitter, see steady_window)
+HB_WINDOW_S = 11.0           # listen this long after the first Heartbeat: 11 or 12 lines, 10 needed (ticket 09)
+HB_COMMANDS = 9              # commands sent during that window
+HB_COMMAND_GAP_S = 1.13      # not a multiple of the 1 s period, so the commands sweep across the Heartbeat tick
+HB_DISCONNECT_S = 5.0        # the Central stays away this long
+HB_AFTER_S = 12.0            # listen after the reconnect: the console markers span the whole scenario
+HB_FIRST_WAIT_S = 3.0        # a Heartbeat follows a subscribe within this
+HB_REBOOT_MAX_SEQ = 6        # "near 0": the Heartbeat counter starts ~3.7 s after the reset and the PC needs ~2 s more to subscribe
+STALL_CAPTURE_S = 32.0       # `debug stall` typed at the start; the stall marker follows within 1 s
+STALL_MIN_S = 25.0           # no reset for this long after the stall marker (the watchdog window is 5 s)
 REBOOT_WINDOW_S = 5.0        # a refused `kernel reboot` must show no [BOOT] in this window (ticket 08)
 SERIAL_REBOOT_S = 20.0       # `kernel reboot` on the serial shell: the [BOOT] marker follows within this
 BLE_LOG_TAIL_S = 1.0         # keep capturing this long after the last step
@@ -124,6 +147,14 @@ A_REFUSE_ALIVE = "Shell link: after the refused `kernel reboot` the same Connect
 A_REFUSE_OTHERS = "Shell link: every other command outside the allow-list, and each input trick, is refused, one ERR line each"
 A_REFUSE_QUIET = "Shell link: none of the refused input reset the board or printed anything but the refusal"
 A_SERIAL_REBOOT = "serial shell: `kernel reboot` resets the board, next boot [BOOT] reason=software"
+A_HB_STEADY = "Heartbeat: 10 s of lines with consecutive seq, 1 s +- 200 ms apart"
+A_HB_INTERLEAVED = "Heartbeat: `led` replies sent meanwhile arrive as whole lines between the Heartbeats, none spliced"
+A_HB_CLEAN = "Heartbeat: the whole stream holds nothing but Heartbeat and reply lines"
+A_HB_GAP = "Heartbeat: after a 5 s disconnect the first seq is 5 or more higher (the counter kept running)"
+A_HB_AFTER = "Heartbeat: consecutive again after the reconnect"
+A_HB_MARKERS = "console: `[HB] seq=N` on every tenth Heartbeat, the same numbers as on the Shell link"
+A_HB_REBOOT = "Heartbeat: after `kernel reboot` on the serial shell the first seq is near 0"
+A_HB_STALL = "debug image: a stalled Heartbeat sender leaves the main loop feeding (no reset, [HB] markers go on, stale lines dropped)"
 A_NOHANG = "production build carries no hang command"
 A_SOAK = "idle: no reset (no spurious watchdog bite)"
 A_BITE = "debug image: hang command leads to a reset within ~5 s, next boot reason=watchdog"
@@ -416,6 +447,163 @@ class Harness:
                 except Exception as e:
                     print(f"harness: closing the Connection failed: {type(e).__name__}: {e}", flush=True)
 
+    # -- the Heartbeat (ticket 09) -----------------------------------------------------
+    def run_heartbeat(self):
+        """Heartbeats over the Shell link with `led` commands sent meanwhile, a 5 s disconnect, the console
+        markers, then a reboot typed on the serial shell and the first Heartbeat after it."""
+        os.makedirs(os.path.join(BUILD_DIR, "verify"), exist_ok=True)
+        stamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+        self.log_path = os.path.join(BUILD_DIR, "verify", f"heartbeat-{stamp}.log")
+        cap = BackgroundCapture(self.args.port, self.log_path, BLE_SCENARIO_S + 30.0)
+        try:
+            cap.start()
+        except OSError as e:
+            return self.check("console capture (Heartbeat scenario)", False, str(e))
+        last = None
+        try:
+            last = asyncio.run(asyncio.wait_for(self.heartbeat_scenario(cap), BLE_SCENARIO_S))
+        except asyncio.TimeoutError:
+            self.check("Heartbeat scenario finishes", False, f"not done after {BLE_SCENARIO_S:.0f} s")
+        except Exception as e:
+            self.check("Heartbeat scenario runs", False, f"{type(e).__name__}: {e}")
+        finally:
+            try:
+                cap.stop(BLE_LOG_TAIL_S)
+            except OSError as e:
+                self.check("console capture (Heartbeat scenario)", False, str(e))
+        print(f"captured {len(cap.lines)} lines -> {self.log_path}", flush=True)
+        if last is None:
+            return self.check(A_HB_REBOOT, False, "no Heartbeat before the reboot to compare with")
+        # Reboot on the serial shell (it keeps every command), then a Central for the first Heartbeat.
+        try:
+            lines = self.capture_to_log(SERIAL_REBOOT_S, False, stop_when=checks.is_boot_line,
+                                        send=b"kernel reboot\r\n", tag="heartbeat-reboot")
+        except (OSError, TimeoutError) as e:
+            return self.check(A_HB_REBOOT, False, f"console capture: {e}")
+        if not checks.check_boot_reason(lines, "software")[0]:
+            return self.check(A_HB_REBOOT, False, "the serial `kernel reboot` did not reset the board")
+        try:
+            first = asyncio.run(asyncio.wait_for(self.heartbeat_after_reboot(), BLE_SCENARIO_S))
+        except asyncio.TimeoutError:
+            return self.check(A_HB_REBOOT, False, f"no Heartbeat after the reboot within {BLE_SCENARIO_S:.0f} s")
+        except Exception as e:
+            return self.check(A_HB_REBOOT, False, f"{type(e).__name__}: {e}")
+        if first is None:
+            return self.check(A_HB_REBOOT, False, "no Heartbeat received after the reboot")
+        self.check(A_HB_REBOOT, *central_logic.check_restart_after_reboot(last, first, HB_REBOOT_MAX_SEQ))
+
+    @staticmethod
+    async def first_heartbeat(conn, timeout):
+        """Wait until the Connection has received a Heartbeat; the Sample, or None."""
+        deadline = time.monotonic() + timeout
+        while not conn.heartbeats and conn.connected and time.monotonic() < deadline:
+            await asyncio.sleep(0.05)
+        return conn.heartbeats[0] if conn.heartbeats else None
+
+    async def heartbeat_after_reboot(self):
+        import central
+
+        dev = await central.find_board(BLE_SCAN_S)
+        if dev is None:
+            return None
+        conn = central.CentralConnection(dev)
+        try:
+            await conn.open()
+            return await self.first_heartbeat(conn, HB_FIRST_WAIT_S)
+        finally:
+            if conn.connected:
+                await conn.close()
+
+    async def steady_window(self, conn, expected):
+        """10 s or more of Heartbeats while `led get` / `led set 128` go out (each appends its wanted
+        reply, 128, to `expected`). Passes when the lines are consecutive and 1 s +- 200 ms apart on
+        the PC clock. The PC clock also sees the radio link: on this PC the link sometimes delivers a
+        Heartbeat 0.3 s to 2 s late for a few seconds, while the board's own `uptime_ms` spacing stays
+        exact (ticket 09 notes). A window that fails only on the PC clock, with the board's spacing
+        exact and every seq consecutive, is therefore tried again, at most HB_ATTEMPTS windows, and
+        the detail says so; a wrong board period, a gap or a reboot fails at once."""
+        import central_logic as cl
+
+        notes = []
+        for attempt in range(1, HB_ATTEMPTS + 1):
+            start = len(conn.heartbeats)
+            if not conn.connected:
+                return False, "; ".join(notes + [f"attempt {attempt}: the link dropped"])
+
+            async def commander():
+                for i in range(HB_COMMANDS):
+                    await asyncio.sleep(HB_COMMAND_GAP_S)
+                    await self.ask(conn, "led get" if i % 2 == 0 else "led set 128")
+                    expected.append(128)
+
+            await asyncio.gather(conn.wait_heartbeats(HB_WINDOW_S), commander())
+            samples = conn.heartbeats[start:]
+            ok, detail = cl.check_heartbeats(samples, min_samples=10)
+            if ok:
+                return True, "; ".join(notes + [detail + (f" (window {attempt})" if attempt > 1 else "")])
+            board_ok, board_detail = cl.check_board_spacing(samples, min_samples=10, max_arrival_s=HB_MAX_ARRIVAL_S)
+            if not board_ok:
+                return False, "; ".join(notes + [f"attempt {attempt}: {board_detail}"])
+            notes.append(f"window {attempt} link jitter ({detail}; board spacing exact: {board_detail})")
+        return False, "; ".join(notes)
+
+    async def heartbeat_scenario(self, cap):
+        """Returns the last Heartbeat Sample received (for the reboot Check), or None."""
+        import central
+        import central_logic as cl
+
+        conn = None
+        try:
+            dev = await central.find_board(BLE_SCAN_S)
+            if dev is None:
+                self.check(A_HB_STEADY, False, f"board not found in {BLE_SCAN_S:.0f} s")
+                return None
+            mark = cap.mark()
+            conn = central.CentralConnection(dev)
+            await conn.open()
+            if await self.first_heartbeat(conn, HB_FIRST_WAIT_S) is None:
+                self.check(A_HB_STEADY, False, f"no Heartbeat within {HB_FIRST_WAIT_S:g} s of subscribing "
+                           f"(link {'up' if conn.connected else 'dropped'})")
+                return None
+            first_line = len(conn.lines)
+
+            # 10 s of Heartbeats while led commands go out, phases sweeping across the tick.
+            expected = []
+            ok, detail = await self.steady_window(conn, expected)
+            self.check(A_HB_STEADY, ok, detail)
+            self.check(A_HB_INTERLEAVED, *cl.check_interleaved(conn.lines[first_line:], expected))
+            ok_clean, d_clean = cl.check_clean_stream(bytes(conn.raw), conn.lines)
+            self.check(A_HB_CLEAN, ok_clean, d_clean)
+            received = [s.seq for s in conn.heartbeats]
+            before = conn.heartbeats[-1]
+
+            # 5 s away, then the first Heartbeat of the new Connection.
+            await conn.close()
+            await asyncio.sleep(HB_DISCONNECT_S)
+            dev = await central.find_board(BLE_SCAN_S)
+            if dev is None:
+                self.check(A_HB_GAP, False, "the board did not advertise again")
+                return before
+            conn = central.CentralConnection(dev)
+            await conn.open()
+            after = await self.first_heartbeat(conn, HB_FIRST_WAIT_S)
+            if after is None:
+                self.check(A_HB_GAP, False, f"no Heartbeat within {HB_FIRST_WAIT_S:g} s of the reconnect "
+                           f"(link {'up' if conn.connected else 'dropped'})")
+                return before
+            self.check(A_HB_GAP, *cl.check_gap_after_disconnect(before, after, HB_DISCONNECT_S))
+            await conn.wait_heartbeats(HB_AFTER_S)
+            self.check(A_HB_AFTER, *cl.check_board_spacing(conn.heartbeats, min_samples=10))
+            received += [s.seq for s in conn.heartbeats]
+            self.check(A_HB_MARKERS, *checks.check_hb_markers(cap.since(mark), received_seqs=received))
+            return conn.heartbeats[-1]
+        finally:
+            if conn is not None and conn.connected:
+                try:
+                    await conn.close()
+                except Exception as e:
+                    print(f"harness: closing the Connection failed: {type(e).__name__}: {e}", flush=True)
+
     # -- the Shell link (ticket 07) ----------------------------------------------
     def run_shell_link(self):
         """`led` commands over the Shell link with the console recorded meanwhile, then the same
@@ -649,6 +837,32 @@ class Harness:
             return
         self.check(A_BITE, *checks.check_wdt_bite(lines, BITE_LIMIT_S))
 
+    def run_stall(self):
+        """Heartbeat stall scenario on the debug image, then the production image is restored."""
+        self.build_dir = DEBUG_BUILD_DIR
+        self.build_env = {"C6_EXTRA_CONF": DEBUG_CONF}
+        try:
+            self.stall_on_debug_image()
+        finally:
+            self.build_dir = BUILD_DIR
+            self.build_env = {}
+            print("restore: rebuilding and re-flashing the production image", flush=True)
+            self.restore_production()
+
+    def stall_on_debug_image(self):
+        if not (self.step_build() and self.step_guard() and self.step_identify()):
+            return
+        if not self.step_flash():
+            return
+        try:
+            self.step_capture()
+            self.check(A_WDT + " (debug image)", *checks.check_wdt_armed(self.lines))
+            lines = self.capture_to_log(STALL_CAPTURE_S, False, send=b"debug stall\r\n", tag="stall")
+        except (OSError, TimeoutError) as e:
+            self.check("console capture (debug image)", False, str(e))
+            return
+        self.check(A_HB_STALL, *checks.check_stall_survived(lines, STALL_MIN_S))
+
     def restore_production(self):
         if not (self.step_build() and self.step_guard() and self.step_flash()):
             return
@@ -677,6 +891,9 @@ class Harness:
         if self.args.bite:
             self.run_bite()
             return self.finish()
+        if self.args.stall:
+            self.run_stall()
+            return self.finish()
         build_ok = self.step_build()
         guard_ok = self.step_guard()
         if not (build_ok and guard_ok and self.step_identify()):
@@ -694,6 +911,7 @@ class Harness:
         self.capture_checks()
         self.check_production_has_no_hang()
         self.run_ble()
+        self.run_heartbeat()
         self.run_shell_link()
         return self.finish()
 
@@ -725,9 +943,13 @@ def main():
                     help="idle mode: keep capturing N s after the boot (default 60) and fail on any reset")
     ap.add_argument("--bite", action="store_true",
                     help="watchdog bite scenario on the debug image; restores the production image afterwards")
+    ap.add_argument("--stall", action="store_true",
+                    help="Heartbeat stall scenario on the debug image; restores the production image afterwards")
     args = ap.parse_args()
-    if args.bite and (args.replay or args.soak):
-        ap.error("--bite is a mode of its own (no --replay, no --soak)")
+    if (args.bite or args.stall) and (args.replay or args.soak):
+        ap.error("--bite and --stall are modes of their own (no --replay, no --soak)")
+    if args.bite and args.stall:
+        ap.error("--bite and --stall are separate modes")
     if args.soak and args.replay:
         ap.error("--soak needs the board; it cannot be combined with --replay")
     if args.seconds <= 0:

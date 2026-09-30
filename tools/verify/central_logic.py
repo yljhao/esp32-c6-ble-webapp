@@ -249,3 +249,88 @@ def check_clean_stream(raw, lines):
         if line.kind == OTHER:
             return False, f"line that is neither reply nor Heartbeat: {line.raw!r}"
     return True, f"{len(lines)} line(s), all replies or Heartbeats, {len(raw)} bytes"
+
+
+# -- Heartbeat Checks (ticket 09) ---------------------------------------------------------------
+
+def check_interleaved(lines, expected_brightness, min_between=3):
+    """`lines` = every Line received in a window during which the Harness sent one command per
+    entry of `expected_brightness` (the `LED <n>` each must answer) and the board sent Heartbeats.
+    Passes when the stream holds only whole Heartbeat and reply lines (a splice of one into the
+    other classifies as OTHER), the replies are exactly the expected ones in order, and at least
+    `min_between` replies sit between two Heartbeats, so the two kinds really did interleave.
+    Returns (ok, detail)."""
+    other = [ln.raw for ln in lines if ln.kind == OTHER]
+    if other:
+        return False, f"line(s) that are neither Heartbeat nor reply (spliced?): {other[:3]}"
+    replies = _replies_only(lines)
+    got = [ln.brightness if ln.kind == LED else f"ERR {ln.message}" for ln in replies]
+    if got != list(expected_brightness):
+        return False, f"replies {got}, expected LED {list(expected_brightness)}"
+    between = 0
+    for i, ln in enumerate(lines):
+        if ln.kind in (LED, ERR):
+            if any(p.kind == HEARTBEAT for p in lines[:i]) and any(n.kind == HEARTBEAT for n in lines[i + 1:]):
+                between += 1
+    if between < min_between:
+        return False, f"only {between} reply line(s) between Heartbeats, need {min_between} to show interleaving"
+    n_hb = sum(1 for ln in lines if ln.kind == HEARTBEAT)
+    return True, f"{n_hb} Heartbeat line(s) and {len(replies)} reply line(s), all whole, {between} reply(ies) between Heartbeats"
+
+
+def check_gap_after_disconnect(prev, cur, disconnect_s=5.0, max_extra_s=6.0, arrival_tol_s=0.6):
+    """After the Central was away for at least `disconnect_s`: the first Heartbeat `cur` is a GAP
+    after the last one before it, `prev`, `disconnect_s` higher or more (the board kept counting),
+    not more than `max_extra_s` more (the reconnect itself takes time), and the number of seconds
+    the seq advanced matches the PC clock between the two arrivals within `arrival_tol_s`.
+    prev/cur are Samples (t, seq, uptime_ms)."""
+    kind = step_kind(prev, cur)
+    if kind != GAP:
+        return False, f"{kind} at seq {prev.seq} -> {cur.seq}, expected a gap"
+    delta = cur.seq - prev.seq
+    elapsed = cur.t - prev.t
+    if delta < disconnect_s:
+        return False, f"seq only {delta} higher after a {disconnect_s:g} s disconnect ({prev.seq} -> {cur.seq})"
+    if delta > disconnect_s + max_extra_s:
+        return False, f"seq {delta} higher, more than {disconnect_s:g} + {max_extra_s:g} ({prev.seq} -> {cur.seq})"
+    if abs(delta - elapsed) > arrival_tol_s:
+        return False, f"seq advanced {delta} in {elapsed:.2f} s of PC time ({prev.seq} -> {cur.seq})"
+    return True, (f"seq {prev.seq} -> {cur.seq}: {delta} higher after {elapsed:.2f} s "
+                  f"({delta - disconnect_s:g} more than the {disconnect_s:g} s disconnect)")
+
+
+def check_restart_after_reboot(prev, cur, max_seq=10):
+    """After a reboot: the first Heartbeat `cur` reads as a REBOOT after `prev` (seq and uptime
+    both restarted) and its seq is near 0 (at most `max_seq`)."""
+    kind = step_kind(prev, cur)
+    if kind != REBOOT:
+        return False, f"{kind} at seq {prev.seq} -> {cur.seq}, expected a reboot"
+    if cur.seq > max_seq:
+        return False, f"seq restarted at {cur.seq}, expected at most {max_seq} (near 0)"
+    return True, f"seq {prev.seq} -> {cur.seq} (uptime_ms {prev.uptime_ms} -> {cur.uptime_ms})"
+
+
+def check_board_spacing(samples, min_samples, period_ms=1000, tol_ms=200, max_arrival_s=None):
+    """The board's own spacing: at least `min_samples` Heartbeats, every step CONSECUTIVE and every
+    `uptime_ms` step within period_ms +- tol_ms. It does not read the PC clock, so it tells a
+    firmware period fault from delivery jitter on the radio link (the Harness retries a window that
+    failed check_heartbeats() on the PC clock alone). With `max_arrival_s`, a line that reached the PC
+    more than that after its predecessor also fails: link jitter is tolerated, a stall is not.
+    Returns (ok, detail)."""
+    samples = [Sample(*s) for s in samples]
+    if len(samples) < min_samples:
+        return False, f"{len(samples)} heartbeat(s), need at least {min_samples}"
+    steps = []
+    for prev, cur in zip(samples, samples[1:]):
+        kind = step_kind(prev, cur)
+        if kind != CONSECUTIVE:
+            return False, f"{kind} at seq {prev.seq} -> {cur.seq}"
+        dt = cur.uptime_ms - prev.uptime_ms
+        if abs(dt - period_ms) > tol_ms:
+            return False, f"board period {dt} ms between seq {prev.seq} -> {cur.seq}, outside {period_ms} +- {tol_ms} ms"
+        if max_arrival_s is not None and cur.t - prev.t > max_arrival_s:
+            return False, f"seq {cur.seq} arrived {cur.t - prev.t:.2f} s after seq {prev.seq}, limit {max_arrival_s:g} s"
+        steps.append(dt)
+    if not steps:
+        return True, f"{len(samples)} heartbeat"
+    return True, f"{len(samples)} heartbeats, board period {min(steps)}..{max(steps)} ms"

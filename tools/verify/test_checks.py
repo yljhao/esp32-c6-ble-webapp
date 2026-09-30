@@ -627,3 +627,76 @@ class SerialLedReplies(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class HeartbeatMarkers(unittest.TestCase):
+    """Ticket 09: `[HB] seq=N` on every tenth Heartbeat."""
+
+    def test_markers_ten_apart_pass(self):
+        ok, detail = checks.check_hb_markers(cap("[HB] seq=10", "x", "[HB] seq=20", "[HB] seq=30"))
+        self.assertTrue(ok, detail)
+
+    def test_too_few_markers_fail(self):
+        self.assertFalse(checks.check_hb_markers(cap("[HB] seq=10"))[0])
+        self.assertFalse(checks.check_hb_markers(cap("noise"))[0])
+
+    def test_a_marker_that_is_not_a_tenth_fails(self):
+        ok, detail = checks.check_hb_markers(cap("[HB] seq=10", "[HB] seq=15"))
+        self.assertFalse(ok)
+        self.assertIn("multiple of 10", detail)
+
+    def test_a_skipped_tenth_fails(self):
+        ok, detail = checks.check_hb_markers(cap("[HB] seq=10", "[HB] seq=30"))
+        self.assertFalse(ok)
+        self.assertIn("apart", detail)
+
+    def test_every_received_tenth_inside_the_range_needs_its_marker(self):
+        lines = cap("[HB] seq=10", "[HB] seq=30")
+        # seq 20 was received but the console skipped it (also caught as "not 10 apart" first)
+        lines_ok = cap("[HB] seq=10", "[HB] seq=20", "[HB] seq=30")
+        self.assertTrue(checks.check_hb_markers(lines_ok, received_seqs=[18, 19, 20, 21])[0])
+        self.assertTrue(checks.check_hb_markers(lines_ok, received_seqs=[20, 40])[0])  # 40: outside the range
+        self.assertFalse(checks.check_hb_markers(lines, received_seqs=[20])[0])
+
+    def test_nothing_received_near_a_marker_gives_no_comparison(self):
+        ok, _ = checks.check_hb_markers(cap("[HB] seq=10", "[HB] seq=20"), received_seqs=[5, 6, 7])
+        self.assertFalse(ok)
+
+    def test_marker_line_must_stand_alone(self):
+        self.assertIsNone(checks.parse_hb_marker("[HB] seq=10 extra"))
+        self.assertEqual(checks.parse_hb_marker("[HB] seq=10"), 10)
+
+
+class StallSurvived(unittest.TestCase):
+    def good(self):
+        return [(0.0, None, "[DBG] stall: heartbeat sender stops"),
+                (3.0, None, "[HB] link stalled: 1 stale heartbeat(s) dropped"),
+                (5.0, None, "[HB] seq=30"),
+                (12.0, None, "[HB] seq=40"),
+                (15.0, None, "tail")]
+
+    def test_no_reset_markers_and_drops_pass(self):
+        ok, detail = checks.check_stall_survived(self.good(), 12.0)
+        self.assertTrue(ok, detail)
+
+    def test_reset_after_the_stall_fails(self):
+        lines = self.good() + [(16.0, None, "ESP-ROM:esp32c6")]
+        ok, detail = checks.check_stall_survived(lines, 12.0)
+        self.assertFalse(ok)
+        self.assertIn("reset", detail)
+
+    def test_missing_stall_marker_fails(self):
+        self.assertFalse(checks.check_stall_survived(self.good()[1:], 12.0)[0])
+
+    def test_short_observation_fails(self):
+        self.assertFalse(checks.check_stall_survived(self.good()[:4], 30.0)[0])
+
+    def test_no_markers_fails(self):
+        lines = [l for l in self.good() if "seq=" not in l[2]]
+        self.assertFalse(checks.check_stall_survived(lines, 10.0, min_markers=2)[0])
+
+    def test_no_drop_report_fails(self):
+        lines = [l for l in self.good() if "stalled:" not in l[2]]
+        ok, detail = checks.check_stall_survived(lines, 12.0)
+        self.assertFalse(ok)
+        self.assertIn("dropped", detail)

@@ -2,6 +2,7 @@
 
 #include "shell_nus.h"
 
+#include "debug_hang.h"
 #include "link_filter.h"
 #include "nus_chunk.h"
 
@@ -148,41 +149,72 @@ static void pick_connected(struct bt_conn *conn, void *user_data)
 	}
 }
 
-/* Send what is collected; called with tx_lock held. Dropped when no Central is connected and
- * subscribed. bt_nus_send() waits without bound for an ATT buffer (att.c, any thread other than
- * the system work queue) while the link is stalled, until the link drops. The shell thread may
- * wait like that; a thread that must not (the main loop feeds the watchdog) must never print to
- * this shell instance from its own context: hand the text to the shell thread instead.
+/* Send `len` bytes as NUS notifications of at most ATT MTU - 3 bytes; called with tx_lock held, so
+ * the notifications of one call are never interleaved with another's. Returns 0, or the error
+ * that ended the send (-ENOTCONN when no Central is connected or subscribed: the bytes are
+ * dropped). bt_nus_send() waits without bound for an ATT buffer (att.c, any thread other than
+ * the system work queue) while the link is stalled, until the link drops. The shell thread and
+ * the Heartbeat sender may wait like that; a thread that must not (the main loop feeds the
+ * watchdog) must never call in here from its own context: hand the text to one of them instead.
  */
-static void tx_flush(void)
+static int send_locked(const uint8_t *data, size_t len)
 {
 	struct bt_conn *conn = NULL;
 	struct nus_chunker chunker;
 	const uint8_t *chunk;
 	size_t n;
+	int err = -ENOTCONN;
 
-	if (tx_len == 0) {
-		return;
-	}
 	bt_conn_foreach(BT_CONN_TYPE_LE, pick_connected, &conn);
 	if (conn != NULL) {
-		nus_chunker_init(&chunker, tx_buf, tx_len, bt_gatt_get_mtu(conn));
+		err = 0;
+		nus_chunker_init(&chunker, data, len, bt_gatt_get_mtu(conn));
 		while ((n = nus_chunker_next(&chunker, &chunk)) > 0) {
-			int err = bt_nus_send(conn, chunk, (uint16_t)n);
-
+			err = bt_nus_send(conn, chunk, (uint16_t)n);
 			if (err) {
-				/* -EINVAL: the Central has not subscribed (expected, silent); anything
-				 * else loses the rest of this output.
-				 */
-				if (err != -EINVAL && err != -ENOTCONN) {
-					LOG_WRN("notification failed (err %d), output dropped", err);
-				}
 				break;
 			}
 		}
 		bt_conn_unref(conn);
 	}
+	return err;
+}
+
+/* Send what the shell collected; called with tx_lock held. Dropped when no Central is connected
+ * and subscribed.
+ */
+static void tx_flush(void)
+{
+	int err;
+
+	if (tx_len == 0) {
+		return;
+	}
+	err = send_locked(tx_buf, tx_len);
+	/* -EINVAL: the Central has not subscribed (expected, silent); anything else loses the rest
+	 * of this output.
+	 */
+	if (err && err != -EINVAL && err != -ENOTCONN) {
+		LOG_WRN("notification failed (err %d), output dropped", err);
+	}
 	tx_len = 0;
+}
+
+int shell_nus_notify(const uint8_t *data, size_t len)
+{
+	int err;
+
+	if (len == 0) {
+		return 0;
+	}
+	k_mutex_lock(&tx_lock, K_FOREVER);
+	/* Debug image only: stand in for a bt_nus_send() stuck on a stalled link, which holds
+	 * tx_lock the same way (the shell thread then waits behind it; the main loop does not).
+	 */
+	debug_hb_stall_point();
+	err = send_locked(data, len);
+	k_mutex_unlock(&tx_lock);
+	return err == -EINVAL ? -ENOTCONN : err;
 }
 
 /* -- shell transport --------------------------------------------------------------------- */
@@ -283,7 +315,8 @@ static bool next_allowed_line(void)
 		case LINK_FILTER_REFUSE:
 			tx_put((const uint8_t *)refusal, sizeof(refusal) - 1);
 			/* a Central can refuse itself at radio speed: log the 1st, 2nd, 4th, 8th ... */
-			if ((++refused & (refused - 1)) == 0) {
+			refused++;
+			if ((refused & (refused - 1)) == 0) {
 				LOG_INF("commands refused on the Shell link: %u so far", refused);
 			}
 			break;

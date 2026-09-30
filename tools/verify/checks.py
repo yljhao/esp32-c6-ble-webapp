@@ -448,3 +448,66 @@ def format_result(results):
 
 def exit_code(results):
     return 0 if results and all(r[1] for r in results) else 1
+
+
+# -- Heartbeat marker on the serial console (ticket 09) ------------------------------------------
+HB_MARKER_RE = re.compile(r"^\[HB\] seq=(\d+)\s*$")
+HB_STALLED_RE = re.compile(r"^\[HB\] link stalled: (\d+) stale heartbeat\(s\) dropped\s*$")
+HB_MARKER_EVERY = 10
+STALL_MARKER = "[DBG] stall: heartbeat sender stops"
+
+
+def parse_hb_marker(text):
+    """`[HB] seq=<n>` -> n, else None."""
+    m = HB_MARKER_RE.match(text)
+    return int(m.group(1)) if m else None
+
+
+def check_hb_markers(lines, received_seqs=(), min_markers=2):
+    """`[HB] seq=N` on the console for every tenth Heartbeat: at least `min_markers`, each N a
+    multiple of 10, consecutive markers exactly 10 apart (a reboot inside `lines` breaks that, so
+    pass a window without one). Every tenth seq the Central received inside the marker range must
+    also have its marker, and at least one such seq must exist, so the console and the Shell link
+    are shown to be the same counter."""
+    seqs = [n for n in (parse_hb_marker(text) for _, _, text in lines) if n is not None]
+    if len(seqs) < min_markers:
+        return False, f"{len(seqs)} [HB] marker(s), need at least {min_markers}"
+    for n in seqs:
+        if n % HB_MARKER_EVERY:
+            return False, f"[HB] seq={n} is not a multiple of {HB_MARKER_EVERY}"
+    for a, b in zip(seqs, seqs[1:]):
+        if b - a != HB_MARKER_EVERY:
+            return False, f"[HB] seq={a} followed by seq={b}, not {HB_MARKER_EVERY} apart"
+    tenths = sorted({n for n in received_seqs if n % HB_MARKER_EVERY == 0 and seqs[0] <= n <= seqs[-1]})
+    missing = [n for n in tenths if n not in seqs]
+    if missing:
+        return False, f"Central received seq {missing} but the console has no [HB] marker for it"
+    if received_seqs and not tenths:
+        return False, "no tenth seq received inside the marker range, cannot compare with the Shell link"
+    return True, (f"{len(seqs)} markers, seq {seqs[0]}..{seqs[-1]} every {HB_MARKER_EVERY}"
+                  + (f", matched Shell link seq {tenths}" if tenths else ""))
+
+
+def check_stall_survived(lines, min_s, min_markers=2):
+    """Debug image, after `debug stall`: the sender-stopped marker, then for at least `min_s`
+    seconds no reset (no ROM banner, no [BOOT]), `[HB] seq=N` markers still coming (the main loop
+    runs on), and the stale Heartbeats dropped and reported."""
+    k = _first(lines, lambda t: t.strip() == STALL_MARKER)
+    if k is None:
+        return False, f"no '{STALL_MARKER}' marker (was the stall command accepted, was a Heartbeat posted?)"
+    t0 = lines[k][0]
+    for t, _, text in lines[k + 1:]:
+        if text.startswith(ROM_BANNER) or is_boot_line(text):
+            return False, f"board reset at +{t - t0:.1f}s after the stall ({text.strip()})"
+    end = lines[-1][0] - t0
+    if end < min_s:
+        return False, f"observed {end:.1f}s after the stall, need {min_s:g}s"
+    after = lines[k + 1:]
+    markers = [n for n in (parse_hb_marker(text) for _, _, text in after) if n is not None]
+    if len(markers) < min_markers:
+        return False, f"{len(markers)} [HB] marker(s) in {end:.1f}s after the stall, need {min_markers}"
+    dropped = [int(m.group(1)) for m in (HB_STALLED_RE.match(text) for _, _, text in after) if m]
+    if not dropped:
+        return False, "no '[HB] link stalled: ... dropped' report, the bounded drop policy did not run"
+    return True, (f"no reset in {end:.1f}s after the stall, {len(markers)} [HB] markers "
+                  f"(seq {markers[0]}..{markers[-1]}), {dropped[-1]} stale heartbeat(s) reported dropped")

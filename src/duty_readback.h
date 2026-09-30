@@ -18,7 +18,8 @@ struct duty_readback {
 	uint32_t samples;      /* samples evaluated */
 	uint32_t low_samples;  /* samples whose level was 0 */
 	uint32_t edges;        /* level changes between consecutive samples */
-	uint32_t low_permille; /* low_samples / samples, in 0.1 % steps */
+	uint32_t low_permille; /* low fraction in 0.1 % steps, over whole periods when the window
+				* holds at least one (else low_samples / samples) */
 	uint32_t freq_hz;      /* edges / 2 / elapsed; 0 when no edge or no time */
 };
 

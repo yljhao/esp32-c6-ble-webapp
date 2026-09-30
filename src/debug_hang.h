@@ -22,4 +22,18 @@ static inline bool debug_hang_requested(void)
 }
 #endif
 
+/*
+ * Debug-only Heartbeat stall proof (same option, ticket 09). "debug stall" makes the Heartbeat
+ * sender thread stop for good inside shell_nus_notify(), holding the TX lock as a bt_nus_send()
+ * stuck on a stalled link would; the main loop must then keep feeding the watchdog and printing "[HB] seq=N". In the
+ * production image the stall point is empty.
+ */
+#ifdef CONFIG_C6_HANG_CMD
+void debug_hb_stall_point(void);
+#else
+static inline void debug_hb_stall_point(void)
+{
+}
+#endif
+
 #endif /* DEBUG_HANG_H */

@@ -32,6 +32,8 @@ DEFAULT_SCAN_S = 10.0
 DEFAULT_CONNECT_S = 15.0
 DEFAULT_REPLY_S = 3.0
 DEFAULT_IO_S = 5.0
+OPEN_ATTEMPTS = 3            # connect + subscribe tries (see CentralConnection.open)
+OPEN_RETRY_PAUSE_S = 1.5
 
 
 async def find_board(timeout=DEFAULT_SCAN_S, name=cl.BOARD_NAME, service_uuid=cl.NUS_SERVICE_UUID):
@@ -72,21 +74,41 @@ class CentralConnection:
     async def __aexit__(self, *exc):
         await self.close()
 
-    async def open(self, timeout=DEFAULT_CONNECT_S):
+    async def open(self, timeout=DEFAULT_CONNECT_S, attempts=OPEN_ATTEMPTS):
+        """Connect and subscribe. The link can drop while the PC's adapter is busy with another Connection
+        (BlueZ then reports 'failed to discover services' or a GATT 'Unlikely Error', measured in ticket 09);
+        that says nothing about the board, so a failed attempt is closed and repeated, at most `attempts`
+        times, and each retry is printed."""
+        for attempt in range(1, attempts + 1):
+            try:
+                await self._open_once(timeout)
+                return
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                if attempt == attempts:
+                    raise
+                print(f"harness: connect attempt {attempt} failed ({type(e).__name__}: {e}); retrying", flush=True)
+                await asyncio.sleep(OPEN_RETRY_PAUSE_S)
+
+    async def _open_once(self, timeout):
         from bleak import BleakClient
 
         self.disconnected.clear()
         self.disconnected_at = None
         self._reasm.reset()
         self._gatt = BleakClient(self._device, disconnected_callback=self._on_disconnect, timeout=timeout)
-        await self._gatt.connect()
         try:
+            await self._gatt.connect()
             # AcquireNotify (a file descriptor of our own) instead of bleak's default StartNotify:
             # after a link that was lost (not closed by us) BlueZ keeps the old notify session,
             # and the next StartNotify then delivers every notification twice (measured, ticket 07).
             await self._gatt.start_notify(cl.NUS_TX_UUID, self._on_notify, bluez={"use_start_notify": False})
         except BaseException:
-            await self.close()       # never leave the one Connection up behind a failed open
+            try:
+                await self.close()       # never leave the one Connection up behind a failed open
+            except Exception:
+                pass
             raise
 
     async def close(self):
