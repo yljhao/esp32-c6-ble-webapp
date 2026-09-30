@@ -8,7 +8,7 @@ Spec: `.scratch/ble-webapp/spec.md` (Web App, Web App automation, user stories 1
 
 **Board:** required
 
-**Status:** ready-for-agent
+**Status:** done
 
 - [x] Playwright selects `XIAO-C6-LED` through CDP `DeviceAccess` without a human; if this cannot work after the escalation in `CLAUDE.md`, park this ticket as `needs-info` with the evidence instead of substituting a human step.
 - [x] The page shows connected and the slider shows the board's current Brightness (50 % at Brightness 128).
